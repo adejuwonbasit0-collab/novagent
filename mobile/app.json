@@ -1,0 +1,24 @@
+{
+  "expo": {
+    "name": "Nova",
+    "slug": "nova-mobile",
+    "version": "0.1.0",
+    "orientation": "portrait",
+    "userInterfaceStyle": "dark",
+    "backgroundColor": "#0B0E14",
+    "assetBundlePatterns": ["**/*"],
+    "ios": {
+      "supportsTablet": true,
+      "bundleIdentifier": "com.nova.assistant"
+    },
+    "android": {
+      "package": "com.nova.assistant",
+      "adaptiveIcon": {
+        "backgroundColor": "#0B0E14"
+      }
+    },
+    "web": {
+      "bundler": "metro"
+    }
+  }
+}

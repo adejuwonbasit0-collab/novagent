@@ -1,0 +1,62 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>Nova</title>
+  <link rel="stylesheet" href="popup.css" />
+</head>
+<body>
+  <div id="app">
+
+    <!-- Login view -->
+    <section id="view-login" class="view">
+      <header class="brand">
+        <span class="ring" data-state="idle"></span>
+        <h1>Nova</h1>
+      </header>
+      <form id="login-form">
+        <p id="login-error" class="error hidden"></p>
+        <label for="email">Email</label>
+        <input id="email" type="email" required autocomplete="email" />
+        <label for="password">Password</label>
+        <input id="password" type="password" required autocomplete="current-password" />
+        <button type="submit" class="btn-primary" id="login-submit">Sign in</button>
+      </form>
+    </section>
+
+    <!-- Chat view -->
+    <section id="view-chat" class="view hidden">
+      <header class="brand">
+        <span class="ring" data-state="idle" id="state-ring"></span>
+        <h1>Nova</h1>
+        <button id="logout-btn" class="btn-icon" title="Sign out">⎋</button>
+      </header>
+
+      <div id="page-context" class="page-context hidden">
+        <span id="page-title"></span>
+        <button id="summarize-btn" class="btn-secondary-sm">Summarize this page</button>
+      </div>
+
+      <div id="messages"></div>
+
+      <div id="confirm-box" class="confirm-box hidden">
+        <p id="confirm-text"></p>
+        <div class="confirm-actions">
+          <button id="confirm-yes" class="btn-primary-sm">Confirm</button>
+          <button id="confirm-no" class="btn-secondary-sm">Cancel</button>
+        </div>
+      </div>
+
+      <form id="chat-form">
+        <input id="chat-input" type="text" placeholder="Ask Nova anything…" autocomplete="off" />
+        <button type="submit" id="chat-submit">Send</button>
+      </form>
+    </section>
+
+  </div>
+
+  <script src="config.js"></script>
+  <script src="api.js"></script>
+  <script src="popup.js"></script>
+</body>
+</html>
