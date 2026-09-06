@@ -10,10 +10,12 @@ from PySide6.QtWidgets import QApplication
 from core.api_client import NovaAPIClient
 from core.conversation_state import ConversationState
 from core.device_store import DeviceStore
+from core.reminder_scheduler import ReminderScheduler
 from core.ws_client import DeviceWebSocketClient
 from ui.bubble import AssistantBubble
 from ui.chat_panel import ChatPanel
 from ui.onboarding import OnboardingDialog
+from ui.reminder_alert import present_reminder
 from config import settings
 
 HEALTH_CHECK_INTERVAL_MS = 15000
@@ -54,6 +56,9 @@ class NovaAgentApp:
         self._health_timer.setInterval(HEALTH_CHECK_INTERVAL_MS)
         self._health_timer.timeout.connect(self._run_health_check)
 
+        self.reminder_scheduler = ReminderScheduler(self.client)
+        self.reminder_scheduler.reminder_due.connect(self._on_reminder_due)
+
         self.bubble.clicked.connect(self._toggle_chat_panel)
         self.bubble.move(100, 100)
 
@@ -61,12 +66,18 @@ class NovaAgentApp:
         if self.chat_panel is not None:
             self.chat_panel.stop_listening()
             if self.chat_panel._voice_listener is not None:
-                self.chat_panel._voice_listener.wait(2000)
+                # Same reasoning as chat_panel.py's _toggle_voice: sd.rec()
+                # can block up to 5s, so this needs real margin, not the
+                # 2000ms this used to use — a timeout here previously just
+                # let the app quit anyway, which destroys the QThread
+                # object while the OS thread could still be running.
+                self.chat_panel._voice_listener.wait(6000)
             if self.chat_panel._sync_worker.isRunning():
                 self.chat_panel._sync_worker.wait(3000)
             self.chat_panel._speech.shutdown()
         if self._health_worker is not None and self._health_worker.isRunning():
             self._health_worker.wait(3000)
+        self.reminder_scheduler.stop()
         self.ws_client.stop()
 
     def _toggle_chat_panel(self) -> None:
@@ -126,6 +137,15 @@ class NovaAgentApp:
         else:
             self.bubble.set_state(ConversationState.OFFLINE if not reachable else ConversationState.IDLE)
 
+    def _on_reminder_due(self, reminder) -> None:
+        # self.chat_panel always exists by the time reminders can fire —
+        # run() creates it (and starts listening) before starting the
+        # scheduler below — but guard anyway since this is reachable from
+        # a QTimer callback outside the normal call stack.
+        if self.chat_panel is None:
+            return
+        present_reminder(reminder, self.client, self.chat_panel._speech)
+
     def run(self) -> int:
         if not self._run_onboarding_if_needed():
             return 0  # user closed the login dialog without completing it
@@ -145,6 +165,7 @@ class NovaAgentApp:
         self._start_ws_client()
         self._health_timer.start()
         self._run_health_check()  # don't wait a full interval for the first reading
+        self.reminder_scheduler.start()
 
         self.bubble.set_state(ConversationState.IDLE)
         self.bubble.show()

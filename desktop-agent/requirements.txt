@@ -11,3 +11,4 @@ sounddevice==0.5.1
 numpy==2.2.2
 pyttsx3==2.98
 pyautogui==0.9.54
+pywin32==308; sys_platform == "win32"

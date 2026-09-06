@@ -122,6 +122,24 @@ class SpeechSpeaker(QThread):
         self._fsm = fsm
 
     def run(self) -> None:
+        # pyttsx3 on Windows drives SAPI5 through COM, and COM requires
+        # each thread that touches it to initialize its own apartment
+        # first. pyttsx3.init() from a QThread with no CoInitialize() call
+        # is a separate, well-documented native crash source on Windows —
+        # distinct from (but easy to mistake for) the QThread-lifetime bug
+        # SpeechManager fixes, since it also only shows up when TTS runs
+        # on a background thread and can present the same way (something
+        # gets spoken, then the process dies). pythoncom only exists on
+        # Windows (it ships with pywin32); everywhere else this is a no-op.
+        com_initialized = False
+        try:
+            import pythoncom
+
+            pythoncom.CoInitialize()
+            com_initialized = True
+        except ImportError:
+            pass  # not on Windows, or pywin32 isn't installed — nothing to do
+
         try:
             if self._fsm is not None:
                 self._fsm.on_speaking()
@@ -131,6 +149,10 @@ class SpeechSpeaker(QThread):
             engine.say(self._text)
             engine.runAndWait()
         finally:
+            if com_initialized:
+                import pythoncom
+
+                pythoncom.CoUninitialize()
             if self._fsm is not None:
                 self._fsm.on_response_complete()
             self.finished_speaking.emit()

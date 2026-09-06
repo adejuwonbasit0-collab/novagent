@@ -15,10 +15,9 @@ from core.conversation_state import ConversationState, ConversationStateMachine
 from core.voice import VoiceListener
 from core.speaker_verification import SpeakerVerifier
 from core.speech_manager import SpeechManager
+from core.local_router import route_locally
 from ui.voice_enrollment import VoiceEnrollmentDialog
 from config import settings
-import re
-from pathlib import Path
 
 
 class SpeakerSyncWorker(QThread):
@@ -105,28 +104,6 @@ class DirectToolWorker(QThread):
             self.finished_ok.emit(result)
         except Exception as exc:
             self.failed.emit(str(exc))
-
-
-def _local_command(message: str) -> tuple[str, dict] | None:
-    """Recognize deterministic computer actions without asking an LLM."""
-    text = message.strip()
-    lowered = text.lower()
-    if re.search(r"\b(open|launch|start)\b.*\b(chrome|google chrome)\b", lowered):
-        return "open_application", {"app_name": "chrome"}
-    if re.search(r"\b(open|launch)\b.*\b(notepad)\b", lowered):
-        return "open_application", {"app_name": "notepad.exe"}
-    if lowered in {"open settings", "go to settings"}:
-        return "open_application", {"app_name": "ms-settings:"}
-    if lowered in {"open control panel", "go to control panel"}:
-        return "open_application", {"app_name": "control.exe"}
-    code_match = re.search(r"(?:open|launch) (.+?) in (?:visual studio code|vs code|vscode)$", text, re.I)
-    if code_match:
-        return "open_folder_in_application", {"path": code_match.group(1).strip().strip('"'), "app_name": "Visual Studio Code"}
-    folder_match = re.search(r"(?:create|make) (?:a )?folder(?: named| called)?\s+(.+)$", text, re.I)
-    if folder_match:
-        name = folder_match.group(1).strip().strip('"')
-        return "create_folder", {"path": str(Path.home() / "Desktop" / name)}
-    return None
 
 
 class ChatPanel(QWidget):
@@ -229,10 +206,23 @@ class ChatPanel(QWidget):
             self._voice_listener.start()
             self.fsm.start()
         elif self._voice_listener:
+            # `sd.rec()` inside VoiceListener.run() blocks for up to 5
+            # seconds per cycle; stop() calls sd.stop() to abort that
+            # blocking call from here, but that's not instantaneous, and a
+            # short wait() timeout that's simply ignored on timeout is the
+            # exact same "drop the reference to a still-running QThread"
+            # crash SpeechManager was written to fix, just for a different
+            # attribute. Give it a real margin (the recording window plus
+            # slack) and, if it still hasn't finished, defer clearing the
+            # reference to the thread's own `finished` signal instead of
+            # guessing — never null it out from here while it might still
+            # be alive.
             listener = self._voice_listener
             listener.stop()
-            listener.wait(2000)
-            self._voice_listener = None
+            if listener.wait(6000):
+                self._voice_listener = None
+            else:
+                listener.finished.connect(lambda: setattr(self, "_voice_listener", None))
             self.fsm.stop()
 
     def _on_voice_transcript(self, message: str) -> None:
@@ -284,11 +274,23 @@ class ChatPanel(QWidget):
         self.input.setEnabled(False)
         self.send_btn.setEnabled(False)
 
-        direct = _local_command(message)
-        if direct:
-            tool_name, params = direct
+        routed = route_locally(message)
+        if isinstance(routed, dict) and "unsupported" in routed:
+            # Recognized as a local-sounding request for a capability that
+            # doesn't exist end-to-end yet (spec section 47: never let a
+            # command pretend to work). Answered directly, zero network
+            # calls, instead of falling through to the cloud LLM, which
+            # has no tool for this either and might otherwise imply it
+            # happened.
+            self._append("Nova", routed["unsupported"])
+            self._speak(routed["unsupported"])
+            self.input.setEnabled(True)
+            self.send_btn.setEnabled(True)
+            return
+
+        if routed is not None:
             self.fsm.on_executing()
-            self._worker = DirectToolWorker(self._client, tool_name, params)
+            self._worker = DirectToolWorker(self._client, routed.tool_name, routed.params)
             self._worker.finished_ok.connect(self._on_direct_reply)
             self._worker.failed.connect(self._on_error)
             self._worker.start()
@@ -318,6 +320,18 @@ class ChatPanel(QWidget):
         self.send_btn.setEnabled(True)
 
     def _on_direct_reply(self, result: ToolCallResult) -> None:
+        # Previously had no REQUIRES_CONFIRMATION case, so a locally
+        # fast-pathed high-risk tool (e.g. "shut down my computer") fell
+        # into the generic failure branch and told the user Nova "could
+        # not complete" the request -- even though the server correctly
+        # withheld the action pending confirmation. Route it through the
+        # same dialog the cloud/LLM path already uses.
+        if result.result == "REQUIRES_CONFIRMATION":
+            self._handle_confirmation_needed(result)
+            self.input.setEnabled(True)
+            self.send_btn.setEnabled(True)
+            return
+
         if result.result == "SUCCESS":
             message = result.message or f"Done: {result.tool_name}"
         elif result.result == "DENIED":
