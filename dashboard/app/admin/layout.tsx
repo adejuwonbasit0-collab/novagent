@@ -11,14 +11,13 @@ const ADMIN_NAV = [
 ];
 
 /**
- * Root layout for the entire /admin route group. This is intentionally a
- * separate route/layout from /dashboard (not a tab hidden inside the user
- * dashboard) so a normal user changing the URL to /admin/whatever never even
- * renders the user-dashboard shell with admin controls in it — they get
- * redirected before any admin page mounts. The real security boundary is
- * still server-side: every /api/v1/admin/* route independently requires
- * admin/super_admin role and 403s otherwise, regardless of what this layout
- * does. This layout only controls what the *browser* shows.
+ * Deliberately does not reuse dashboard/layout.tsx or its <aside> — spec
+ * section 23 asks for admin and user to be "completely separate," not
+ * the same shell with an extra nav item shown conditionally, which is
+ * exactly what this used to be (/dashboard/admin/* inside
+ * DashboardLayout). A visibly different shell (dark red accent instead
+ * of the product's normal accent color) also means an admin can never
+ * mistake which context they're in mid-session.
  */
 export default function AdminLayout({ children }: { children: React.ReactNode }) {
   const { user, loading, isAdmin } = useRequireAdmin();
@@ -35,9 +34,9 @@ export default function AdminLayout({ children }: { children: React.ReactNode })
 
   return (
     <div className="min-h-screen flex">
-      <aside className="w-56 border-r border-border flex flex-col bg-panel/40">
+      <aside className="w-56 border-r border-border flex flex-col bg-[#1a0f0f]">
         <div className="px-5 py-5 border-b border-border">
-          <p className="font-display font-bold text-lg">Nova Admin</p>
+          <p className="font-display font-bold text-lg text-red-400">Nova Admin</p>
           <p className="text-xs text-muted mt-1">Platform administration</p>
         </div>
 
@@ -49,7 +48,7 @@ export default function AdminLayout({ children }: { children: React.ReactNode })
                 key={item.href}
                 href={item.href}
                 className={`block px-3 py-2 rounded text-sm transition-colors ${
-                  active ? "bg-accent/15 text-accent" : "text-muted hover:text-ink hover:bg-panel"
+                  active ? "bg-red-500/15 text-red-300" : "text-muted hover:text-ink hover:bg-panel"
                 }`}
               >
                 {item.label}
@@ -59,7 +58,7 @@ export default function AdminLayout({ children }: { children: React.ReactNode })
         </nav>
 
         <div className="px-4 py-4 border-t border-border space-y-2">
-          <Link href="/dashboard" className="block text-xs text-muted hover:text-ink">
+          <Link href="/dashboard" className="btn-secondary w-full text-sm block text-center">
             ← Back to user dashboard
           </Link>
           <p className="text-xs text-muted truncate">{user.email}</p>

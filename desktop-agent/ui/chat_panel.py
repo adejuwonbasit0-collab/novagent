@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from PySide6.QtCore import Qt, QThread, Signal
+from PySide6.QtCore import Qt, QThread, QTimer, Signal
 from PySide6.QtWidgets import (
     QLineEdit,
     QMessageBox,
@@ -11,11 +11,37 @@ from PySide6.QtWidgets import (
 )
 
 from core.api_client import ChatReply, NovaAPIClient, ToolCallResult
-from ui.bubble import AgentState
+from core.conversation_state import ConversationState, ConversationStateMachine
 from core.voice import SpeechSpeaker, VoiceListener
+from core.speaker_verification import SpeakerVerifier
+from ui.voice_enrollment import VoiceEnrollmentDialog
 from config import settings
 import re
 from pathlib import Path
+
+
+class SpeakerSyncWorker(QThread):
+    """Pulls the current speaker-verification template from the backend at
+    startup so the gate reflects whatever was last enrolled/reset -- from
+    this device or another one, or via the dashboard. Runs once per app
+    launch; verify() itself never touches the network (see SpeakerVerifier)."""
+
+    finished_sync = Signal()
+
+    def __init__(self, verifier: SpeakerVerifier, client: NovaAPIClient):
+        super().__init__()
+        self._verifier = verifier
+        self._client = client
+
+    def run(self) -> None:
+        import asyncio
+
+        try:
+            asyncio.run(self._verifier.sync_from_backend(self._client))
+        except Exception:
+            pass  # offline at startup -- fall back to whatever's already cached locally
+        finally:
+            self.finished_sync.emit()
 
 
 class ChatWorker(QThread):
@@ -103,14 +129,25 @@ def _local_command(message: str) -> tuple[str, dict] | None:
 
 
 class ChatPanel(QWidget):
-    state_changed = Signal(AgentState)
-
     def __init__(self, client: NovaAPIClient):
         super().__init__()
         self._client = client
         self._worker: QThread | None = None
         self._voice_listener: VoiceListener | None = None
         self._speaker: SpeechSpeaker | None = None
+
+        # Single source of truth for "what is Nova doing right now" (spec
+        # section 36) -- the bubble, this panel, and VoiceListener all
+        # react to or drive the same instance rather than each tracking
+        # their own notion of state. Public so main.py can wire it
+        # straight to the bubble and to the bubble's Pause/Resume/Stop
+        # controls (spec section 37).
+        self.fsm = ConversationStateMachine()
+        self.fsm.state_changed.connect(self._on_fsm_state_changed)
+
+        self._verifier = SpeakerVerifier()
+        self._sync_worker = SpeakerSyncWorker(self._verifier, client)
+        self._sync_worker.start()
 
         self.setWindowFlags(Qt.WindowType.Tool | Qt.WindowType.WindowStaysOnTopHint)
         self.setWindowTitle("Nova")
@@ -136,6 +173,10 @@ class ChatPanel(QWidget):
         self.listen_btn.toggled.connect(self._toggle_voice)
         layout.addWidget(self.listen_btn)
 
+        self.voice_setup_btn = QPushButton("Set up voice verification")
+        self.voice_setup_btn.clicked.connect(self._open_voice_enrollment)
+        layout.addWidget(self.voice_setup_btn)
+
     def start_listening(self) -> None:
         if not self.listen_btn.isChecked():
             self.listen_btn.setChecked(True)
@@ -148,24 +189,55 @@ class ChatPanel(QWidget):
     def _append(self, who: str, text: str) -> None:
         self.history.append(f"<b>{who}:</b> {text}")
 
+    def _on_fsm_state_changed(self, state: ConversationState) -> None:
+        """Keeps the listen button's label/checked state honest even when
+        the transition originated from the bubble's context menu rather
+        than this button -- e.g. Stop from the bubble shouldn't leave the
+        button showing 'Start listening' as still checked."""
+        if state == ConversationState.STOPPED:
+            self.listen_btn.blockSignals(True)
+            self.listen_btn.setChecked(False)
+            self.listen_btn.blockSignals(False)
+            self.listen_btn.setText(f"Start listening for {settings.ASSISTANT_NAME}")
+        elif state == ConversationState.PAUSED:
+            self.listen_btn.setText("Paused — right-click the bubble to resume")
+        elif state in (ConversationState.LISTENING, ConversationState.ACTIVE_CONVERSATION) and not self.listen_btn.isChecked():
+            self.listen_btn.blockSignals(True)
+            self.listen_btn.setChecked(True)
+            self.listen_btn.blockSignals(False)
+            self.listen_btn.setText(f"Listening for {settings.ASSISTANT_NAME}")
+
+    def _open_voice_enrollment(self) -> None:
+        was_listening = self.listen_btn.isChecked()
+        if was_listening:
+            self.listen_btn.setChecked(False)  # pause wake-word listening while the mic is used for enrollment
+
+        dialog = VoiceEnrollmentDialog(self._client, self._verifier)
+        dialog.exec()
+
+        if was_listening:
+            self.listen_btn.setChecked(True)
+
     def _toggle_voice(self, enabled: bool) -> None:
         if enabled:
-            self._voice_listener = VoiceListener(settings.ASSISTANT_NAME, settings.VOICE_LANGUAGE)
+            self._voice_listener = VoiceListener(settings.ASSISTANT_NAME, self._verifier, self.fsm, settings.VOICE_LANGUAGE)
             self._voice_listener.transcript.connect(self._on_voice_transcript)
             self._voice_listener.status.connect(self._on_voice_status)
             self._voice_listener.failed.connect(self._on_voice_error)
             self._voice_listener.finished.connect(lambda: self.listen_btn.setChecked(False))
             self._voice_listener.start()
-            self.state_changed.emit(AgentState.LISTENING)
+            self.fsm.start()
         elif self._voice_listener:
             listener = self._voice_listener
             listener.stop()
             listener.wait(2000)
             self._voice_listener = None
-            self.listen_btn.setText(f"Start listening for {settings.ASSISTANT_NAME}")
-            self.state_changed.emit(AgentState.IDLE)
+            self.fsm.stop()
 
     def _on_voice_transcript(self, message: str) -> None:
+        # WAKE_DETECTED/VERIFYING/rejection are handled inside VoiceListener
+        # via direct fsm calls (core/voice.py) -- by the time a transcript
+        # reaches here, verification already passed.
         if not message:
             self._speak(f"Yes, I'm listening.")
             return
@@ -175,18 +247,19 @@ class ChatPanel(QWidget):
         self.listen_btn.setChecked(False)
         self._append("Nova", f"Microphone error: {error}")
         self._speak(f"I cannot use the microphone. {error}")
-        self.state_changed.emit(AgentState.IDLE)
 
     def _on_voice_status(self, text: str) -> None:
-        self.listen_btn.setText(text)
+        if not self.listen_btn.isChecked():
+            return
         if text.startswith("Speech service unavailable") or text.startswith("Microphone"):
             self._append("Nova", text)
             self._speak(text)
 
     def _speak(self, text: str) -> None:
         if not text:
+            self.fsm.on_response_complete()  # nothing to say -- don't leave the FSM stuck mid-turn
             return
-        self._speaker = SpeechSpeaker(text)
+        self._speaker = SpeechSpeaker(text, self.fsm)
         self._speaker.start()
 
     def _on_submit(self) -> None:
@@ -204,14 +277,14 @@ class ChatPanel(QWidget):
         direct = _local_command(message)
         if direct:
             tool_name, params = direct
-            self.state_changed.emit(AgentState.EXECUTING)
+            self.fsm.on_executing()
             self._worker = DirectToolWorker(self._client, tool_name, params)
             self._worker.finished_ok.connect(self._on_direct_reply)
             self._worker.failed.connect(self._on_error)
             self._worker.start()
             return
 
-        self.state_changed.emit(AgentState.THINKING)
+        self.fsm.on_thinking()
         self._worker = ChatWorker(self._client, message)
         self._worker.finished_ok.connect(self._on_reply)
         self._worker.failed.connect(self._on_error)
@@ -219,7 +292,7 @@ class ChatPanel(QWidget):
 
     def _on_reply(self, reply: ChatReply) -> None:
         self._append("Nova", reply.reply)
-        self._speak(reply.reply)
+        self._speak(reply.reply)  # SpeechSpeaker drives fsm -> SPEAKING -> on_response_complete
 
         for call in reply.tool_calls:
             if call.result == "REQUIRES_CONFIRMATION":
@@ -233,7 +306,6 @@ class ChatPanel(QWidget):
 
         self.input.setEnabled(True)
         self.send_btn.setEnabled(True)
-        self.state_changed.emit(AgentState.IDLE)
 
     def _on_direct_reply(self, result: ToolCallResult) -> None:
         if result.result == "SUCCESS":
@@ -246,14 +318,13 @@ class ChatPanel(QWidget):
         self._speak(message)
         self.input.setEnabled(True)
         self.send_btn.setEnabled(True)
-        self.state_changed.emit(AgentState.IDLE)
 
     def _on_error(self, error: str) -> None:
         self._append("Nova", f"⚠️ Something went wrong: {error}")
+        self.fsm.on_error()
         self._speak("I couldn't complete that request.")
         self.input.setEnabled(True)
         self.send_btn.setEnabled(True)
-        self.state_changed.emit(AgentState.IDLE)
 
     def _handle_confirmation_needed(self, call: ToolCallResult) -> None:
         """
@@ -268,13 +339,13 @@ class ChatPanel(QWidget):
         box.setDefaultButton(QMessageBox.StandardButton.Cancel)
 
         if box.exec() == QMessageBox.StandardButton.Yes and call.pending_id:
-            self.state_changed.emit(AgentState.EXECUTING)
+            self.fsm.on_executing()
             confirm_worker = ConfirmWorker(self._client, call.pending_id)
             confirm_worker.finished_ok.connect(
                 lambda result: self._append("Nova", result.message or f"{result.tool_name}: {result.result}")
             )
             confirm_worker.failed.connect(lambda err: self._append("Nova", f"⚠️ Confirmation failed: {err}"))
-            confirm_worker.finished.connect(lambda: self.state_changed.emit(AgentState.IDLE))
+            confirm_worker.finished.connect(self.fsm.on_response_complete)
             confirm_worker.start()
             self._confirm_worker = confirm_worker  # keep a reference so it isn't garbage-collected mid-run
         else:

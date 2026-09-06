@@ -137,7 +137,7 @@ assumed to work. Specifics are in each sub-project's own README:
   actual iOS/Android distribution target, which uses a different,
   well-established native code path. See `mobile/README.md` for the full
   breakdown.
-- Admin dashboard (`/api/v1/admin/*` + `/dashboard/admin`): user
+- Admin dashboard (`/api/v1/admin/*` + `/admin`): user
   list/suspend/reactivate/role-change, platform-wide device oversight
   with revoke, audit log inspection, aggregate stats. Every route
   requires admin/super-admin role (403 otherwise, verified directly); an

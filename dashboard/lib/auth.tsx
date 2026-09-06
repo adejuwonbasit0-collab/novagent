@@ -69,29 +69,34 @@ export function useRequireAuth() {
 }
 
 /**
- * Redirects to /login if there's no authenticated user, and to /dashboard if
- * the authenticated user isn't an admin/super_admin. This is the client-side
- * gate for the entire /admin route group — it exists purely for UX (so a
- * non-admin never even sees an admin layout flash by). It is NOT the real
- * security boundary: every admin API route independently checks the role
- * server-side via get_current_admin and returns 403 regardless of what the
- * client does, so a normal user can never reach admin functionality by
- * hitting the API directly or editing the URL.
+ * Same idea as useRequireAuth, but for /admin/* (spec section 23: admin
+ * and user must be completely separate — separate routes AND separate
+ * authorization, not the same "logged in" check with a nav link hidden).
+ * A logged-out visitor goes to /login same as any other page; a logged-in
+ * but non-admin user is bounced to /dashboard rather than /login, since
+ * "you're not allowed here" is a different situation from "you're not
+ * signed in" and shouldn't be presented as one.
+ *
+ * This is the UX layer only. The actual authorization boundary is the
+ * backend's get_current_admin dependency (every /api/v1/admin/* call is
+ * independently re-checked there) — this hook, and the edge middleware
+ * in middleware.ts, exist so an unauthorized user never sees the admin
+ * UI render at all, not because either one is trusted as the real gate.
  */
 export function useRequireAdmin() {
   const { user, loading } = useAuth();
   const router = useRouter();
 
+  const isAdmin = user?.role === "admin" || user?.role === "super_admin";
+
   useEffect(() => {
     if (loading) return;
     if (!user) {
       router.replace("/login");
-      return;
-    }
-    if (user.role !== "admin" && user.role !== "super_admin") {
+    } else if (!isAdmin) {
       router.replace("/dashboard");
     }
-  }, [loading, user, router]);
+  }, [loading, user, isAdmin, router]);
 
-  return { user, loading, isAdmin: !!user && (user.role === "admin" || user.role === "super_admin") };
+  return { user, loading: loading || (!!user && !isAdmin), isAdmin };
 }

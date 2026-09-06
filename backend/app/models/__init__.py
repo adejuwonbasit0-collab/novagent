@@ -5,6 +5,12 @@ from app.models.pending_tool_call import PendingToolCall
 from app.models.platform_settings import PlatformSettings
 from app.models.permission import PERMISSION_RISK, PermissionScope, RiskLevel, UserPermission
 from app.models.reminder import RecurrenceType, Reminder, ReminderStatus
+from app.models.speaker_profile import (
+    DEFAULT_MATCH_THRESHOLD,
+    EMBEDDING_DIM,
+    SpeakerProfile,
+    SpeakerProfileStatus,
+)
 from app.models.user import User, UserRole, UserStatus
 from app.models.voice import (
     ProfileStatus,
@@ -30,6 +36,10 @@ __all__ = [
     "RecurrenceType",
     "Reminder",
     "ReminderStatus",
+    "DEFAULT_MATCH_THRESHOLD",
+    "EMBEDDING_DIM",
+    "SpeakerProfile",
+    "SpeakerProfileStatus",
     "User",
     "UserRole",
     "UserStatus",

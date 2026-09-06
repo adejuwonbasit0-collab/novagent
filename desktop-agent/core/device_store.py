@@ -16,6 +16,13 @@ KEYRING_USERNAME = "device_token"
 _FALLBACK_KEY_FILE = CONFIG_DIR / ".local_key"
 _FALLBACK_TOKEN_FILE = CONFIG_DIR / ".local_token"
 
+# Cached speaker-verification template (embedding vector + threshold/enabled
+# flag), synced from GET /api/v1/speaker/template. Not a secret on the level
+# of a device token, but it's biometric-derived data, so it gets the same
+# owner-only file permissions as the encrypted-token fallback rather than
+# being written world-readable.
+_SPEAKER_TEMPLATE_FILE = CONFIG_DIR / "speaker_template.json"
+
 
 def detect_platform() -> str:
     system = platform.system().lower()
@@ -115,6 +122,36 @@ class DeviceStore:
             keyring.delete_password(KEYRING_SERVICE, KEYRING_USERNAME)
         except keyring.errors.KeyringError:
             pass
-        for f in (_FALLBACK_TOKEN_FILE, _FALLBACK_KEY_FILE):
+        for f in (_FALLBACK_TOKEN_FILE, _FALLBACK_KEY_FILE, _SPEAKER_TEMPLATE_FILE):
             if f.exists():
                 f.unlink()
+
+    # ---- speaker verification template cache ----
+    # Kept separate from the token methods above: this is device-local
+    # storage of an *account-level* template (synced from the backend so
+    # verification keeps working with no network — spec section 38), not
+    # device identity.
+
+    @staticmethod
+    def save_speaker_template(embedding: list[float] | None, threshold: float, enabled: bool) -> None:
+        _SPEAKER_TEMPLATE_FILE.write_text(
+            json.dumps({"embedding": embedding, "threshold": threshold, "enabled": enabled})
+        )
+        try:
+            _SPEAKER_TEMPLATE_FILE.chmod(stat.S_IRUSR | stat.S_IWUSR)
+        except Exception:
+            pass  # best-effort on platforms where chmod semantics differ (e.g. some Windows setups)
+
+    @staticmethod
+    def get_speaker_template() -> dict | None:
+        if not _SPEAKER_TEMPLATE_FILE.exists():
+            return None
+        try:
+            return json.loads(_SPEAKER_TEMPLATE_FILE.read_text())
+        except Exception:
+            return None
+
+    @staticmethod
+    def clear_speaker_template() -> None:
+        if _SPEAKER_TEMPLATE_FILE.exists():
+            _SPEAKER_TEMPLATE_FILE.unlink()

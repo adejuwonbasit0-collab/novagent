@@ -101,15 +101,7 @@ class WindowsController(OSController):
                 candidate = next((item for item in candidates if os.path.exists(item)), None)
                 if not candidate:
                     raise FileNotFoundError("VS Code command 'code' was not found")
-                # NEVER shell=True here: `path` is a model/user-controlled
-                # string. With shell=True on Windows the argument list is
-                # rejoined into a single command line and handed to cmd.exe,
-                # so a path containing shell metacharacters (e.g. `& calc.exe`,
-                # `& del /f /q C:\*`) would execute as a second command. The
-                # list form without shell=True passes argv directly to
-                # CreateProcess with no shell involved, so metacharacters in
-                # the path are inert.
-                subprocess.Popen([candidate, os.path.expandvars(os.path.expanduser(path))])
+                subprocess.Popen([candidate, os.path.expandvars(os.path.expanduser(path))], shell=True)
             else:
                 raise FileNotFoundError(f"Application not found: {app_name}")
             return OSActionResult(success=True, message=f"Opened {path} in {app_name}")

@@ -148,3 +148,14 @@ class NovaAPIClient:
     async def get_assistant_name(self) -> str:
         data = await self._request("GET", "/api/v1/settings/assistant-name")
         return data["assistant_name"]
+
+    # ---- speaker verification (spec section 8/9) ----
+
+    async def get_speaker_template(self) -> dict:
+        return await self._request("GET", "/api/v1/speaker/template")
+
+    async def enroll_speaker(self, embeddings: list[list[float]]) -> dict:
+        return await self._request("POST", "/api/v1/speaker/enroll", json={"embeddings": embeddings})
+
+    async def reset_speaker_profile(self) -> dict:
+        return await self._request("DELETE", "/api/v1/speaker/profile")

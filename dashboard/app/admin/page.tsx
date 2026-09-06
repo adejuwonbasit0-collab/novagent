@@ -2,7 +2,6 @@
 
 import { useEffect, useState } from "react";
 import { api, AdminUser, AdminDevice, AdminAuditLog, AdminStats, APIError } from "@/lib/api";
-import { useAuth } from "@/lib/auth";
 
 type Tab = "users" | "devices" | "logs";
 
@@ -12,7 +11,6 @@ function formatDate(iso: string | null): string {
 }
 
 export default function AdminPage() {
-  const { user } = useAuth();
   const [tab, setTab] = useState<Tab>("users");
   const [stats, setStats] = useState<AdminStats | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -20,18 +18,6 @@ export default function AdminPage() {
   useEffect(() => {
     api.adminGetStats().then(setStats).catch(() => {});
   }, []);
-
-  // The /admin layout's useRequireAdmin already redirects non-admins away,
-  // and the server independently 403s any non-admin call — this is just a
-  // friendlier message in the brief window before that redirect fires.
-  if (user && user.role !== "admin" && user.role !== "super_admin") {
-    return (
-      <div className="max-w-2xl">
-        <h1 className="text-2xl font-bold mb-2">Admin</h1>
-        <p className="text-muted">You don&apos;t have access to this section.</p>
-      </div>
-    );
-  }
 
   return (
     <div className="max-w-4xl">
@@ -76,15 +62,16 @@ export default function AdminPage() {
 
 function StatCard({ label, value, accent }: { label: string; value: number; accent?: "danger" }) {
   return (
-    <div className="card py-3">
-      <p className="text-xs text-muted mb-1">{label}</p>
-      <p className={`text-2xl font-display font-bold ${accent === "danger" ? "text-danger" : ""}`}>{value}</p>
+    <div className="card">
+      <p className="text-muted text-xs mb-1">{label}</p>
+      <p className={`text-2xl font-display font-bold ${accent === "danger" && value > 0 ? "text-danger" : ""}`}>
+        {value}
+      </p>
     </div>
   );
 }
 
-function UsersTab({ onError }: { onError: (message: string | null) => void }) {
-  const { user: currentUser } = useAuth();
+function UsersTab({ onError }: { onError: (e: string | null) => void }) {
   const [users, setUsers] = useState<AdminUser[] | null>(null);
   const [busyId, setBusyId] = useState<string | null>(null);
 
@@ -92,7 +79,7 @@ function UsersTab({ onError }: { onError: (message: string | null) => void }) {
     try {
       setUsers(await api.adminListUsers());
     } catch (err) {
-      onError(err instanceof APIError ? err.message : "Could not load users.");
+      onError(err instanceof APIError ? err.message : "Failed to load users.");
     }
   }
 
@@ -101,88 +88,59 @@ function UsersTab({ onError }: { onError: (message: string | null) => void }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  async function update(id: string, patch: { status?: string; role?: string }) {
-    setBusyId(id);
+  async function toggleSuspend(u: AdminUser) {
+    setBusyId(u.id);
     onError(null);
     try {
-      const updated = await api.adminUpdateUser(id, patch);
-      setUsers((prev) => (prev ? prev.map((u) => (u.id === id ? updated : u)) : prev));
+      await api.adminUpdateUser(u.id, { status: u.status === "suspended" ? "active" : "suspended" });
+      await load();
     } catch (err) {
-      onError(err instanceof APIError ? err.message : "Could not update user.");
+      onError(err instanceof APIError ? err.message : "Failed to update user.");
     } finally {
       setBusyId(null);
     }
   }
 
-  if (!users) return <p className="text-muted text-sm">Loading…</p>;
+  if (users === null) return <p className="text-muted text-sm">Loading…</p>;
 
   return (
-    <div className="card overflow-x-auto">
-      <table className="w-full text-sm">
-        <thead>
-          <tr className="text-left text-muted border-b border-border">
-            <th className="py-2 pr-4">Email</th>
-            <th className="py-2 pr-4">Role</th>
-            <th className="py-2 pr-4">Status</th>
-            <th className="py-2 pr-4">Joined</th>
-            <th className="py-2">Actions</th>
-          </tr>
-        </thead>
-        <tbody>
-          {users.map((u) => {
-            const isSelf = currentUser?.id === u.id;
-            return (
-              <tr key={u.id} className="border-b border-border last:border-0">
-                <td className="py-2 pr-4">{u.email}</td>
-                <td className="py-2 pr-4 capitalize">{u.role.replace("_", " ")}</td>
-                <td className="py-2 pr-4 capitalize">{u.status}</td>
-                <td className="py-2 pr-4">{formatDate(u.created_at)}</td>
-                <td className="py-2 space-x-2">
-                  {u.status === "active" ? (
-                    <button
-                      disabled={isSelf || busyId === u.id}
-                      onClick={() => update(u.id, { status: "suspended" })}
-                      className="text-danger text-xs disabled:opacity-40"
-                    >
-                      Suspend
-                    </button>
-                  ) : (
-                    <button
-                      disabled={busyId === u.id}
-                      onClick={() => update(u.id, { status: "active" })}
-                      className="text-active text-xs disabled:opacity-40"
-                    >
-                      Reactivate
-                    </button>
-                  )}
-                  {u.role === "user" ? (
-                    <button
-                      disabled={isSelf || busyId === u.id}
-                      onClick={() => update(u.id, { role: "admin" })}
-                      className="text-accent text-xs disabled:opacity-40"
-                    >
-                      Make admin
-                    </button>
-                  ) : u.role === "admin" ? (
-                    <button
-                      disabled={isSelf || busyId === u.id}
-                      onClick={() => update(u.id, { role: "user" })}
-                      className="text-muted text-xs disabled:opacity-40"
-                    >
-                      Remove admin
-                    </button>
-                  ) : null}
-                </td>
-              </tr>
-            );
-          })}
-        </tbody>
-      </table>
+    <div className="space-y-2">
+      {users.map((u) => (
+        <div key={u.id} className="card flex items-center justify-between gap-4">
+          <div className="min-w-0">
+            <div className="flex items-center gap-2">
+              <p className="font-medium text-sm truncate">{u.email}</p>
+              <span
+                className={`text-xs px-2 py-0.5 rounded font-mono uppercase ${
+                  u.status === "active" ? "bg-active/15 text-active" : "bg-danger/15 text-danger"
+                }`}
+              >
+                {u.status}
+              </span>
+              {u.role !== "user" && (
+                <span className="text-xs px-2 py-0.5 rounded font-mono uppercase bg-accent/15 text-accent">
+                  {u.role}
+                </span>
+              )}
+            </div>
+            <p className="text-xs text-muted font-mono mt-0.5">
+              {u.device_count} device{u.device_count === 1 ? "" : "s"} · joined {formatDate(u.created_at)}
+            </p>
+          </div>
+          <button
+            onClick={() => toggleSuspend(u)}
+            disabled={busyId === u.id}
+            className={u.status === "suspended" ? "btn-secondary text-sm shrink-0" : "btn-danger text-sm shrink-0"}
+          >
+            {u.status === "suspended" ? "Reactivate" : "Suspend"}
+          </button>
+        </div>
+      ))}
     </div>
   );
 }
 
-function DevicesTab({ onError }: { onError: (message: string | null) => void }) {
+function DevicesTab({ onError }: { onError: (e: string | null) => void }) {
   const [devices, setDevices] = useState<AdminDevice[] | null>(null);
   const [busyId, setBusyId] = useState<string | null>(null);
 
@@ -190,7 +148,7 @@ function DevicesTab({ onError }: { onError: (message: string | null) => void }) 
     try {
       setDevices(await api.adminListDevices());
     } catch (err) {
-      onError(err instanceof APIError ? err.message : "Could not load devices.");
+      onError(err instanceof APIError ? err.message : "Failed to load devices.");
     }
   }
 
@@ -203,93 +161,87 @@ function DevicesTab({ onError }: { onError: (message: string | null) => void }) 
     setBusyId(id);
     onError(null);
     try {
-      // The revoke endpoint returns no body — reflect the change locally
-      // rather than treating a void response as an updated device.
       await api.adminRevokeDevice(id);
-      setDevices((prev) => (prev ? prev.map((d) => (d.id === id ? { ...d, is_active: false } : d)) : prev));
+      await load();
     } catch (err) {
-      onError(err instanceof APIError ? err.message : "Could not revoke device.");
+      onError(err instanceof APIError ? err.message : "Failed to revoke device.");
     } finally {
       setBusyId(null);
     }
   }
 
-  if (!devices) return <p className="text-muted text-sm">Loading…</p>;
+  if (devices === null) return <p className="text-muted text-sm">Loading…</p>;
 
   return (
-    <div className="card overflow-x-auto">
-      <table className="w-full text-sm">
-        <thead>
-          <tr className="text-left text-muted border-b border-border">
-            <th className="py-2 pr-4">Name</th>
-            <th className="py-2 pr-4">Owner</th>
-            <th className="py-2 pr-4">Platform</th>
-            <th className="py-2 pr-4">Status</th>
-            <th className="py-2 pr-4">Last seen</th>
-            <th className="py-2">Actions</th>
-          </tr>
-        </thead>
-        <tbody>
-          {devices.map((d) => (
-            <tr key={d.id} className="border-b border-border last:border-0">
-              <td className="py-2 pr-4">{d.name}</td>
-              <td className="py-2 pr-4">{d.user_email}</td>
-              <td className="py-2 pr-4">{d.platform}</td>
-              <td className="py-2 pr-4 capitalize">{d.is_active ? "Active" : "Revoked"}</td>
-              <td className="py-2 pr-4">{formatDate(d.last_seen_at)}</td>
-              <td className="py-2">
-                {d.is_active && (
-                  <button
-                    disabled={busyId === d.id}
-                    onClick={() => revoke(d.id)}
-                    className="text-danger text-xs disabled:opacity-40"
-                  >
-                    Revoke
-                  </button>
-                )}
-              </td>
-            </tr>
-          ))}
-        </tbody>
-      </table>
+    <div className="space-y-2">
+      {devices.map((d) => (
+        <div key={d.id} className="card flex items-center justify-between gap-4">
+          <div className="min-w-0">
+            <div className="flex items-center gap-2">
+              <p className="font-medium text-sm truncate">{d.name}</p>
+              <span
+                className={`text-xs px-2 py-0.5 rounded font-mono uppercase ${
+                  d.is_active ? "bg-active/15 text-active" : "bg-danger/15 text-danger"
+                }`}
+              >
+                {d.is_active ? "active" : "revoked"}
+              </span>
+            </div>
+            <p className="text-xs text-muted font-mono mt-0.5">
+              {d.user_email} · {d.platform} · last seen {formatDate(d.last_seen_at)}
+            </p>
+          </div>
+          {d.is_active && (
+            <button
+              onClick={() => revoke(d.id)}
+              disabled={busyId === d.id}
+              className="btn-danger text-sm shrink-0"
+            >
+              Revoke
+            </button>
+          )}
+        </div>
+      ))}
     </div>
   );
 }
 
-function LogsTab({ onError }: { onError: (message: string | null) => void }) {
+function LogsTab({ onError }: { onError: (e: string | null) => void }) {
   const [logs, setLogs] = useState<AdminAuditLog[] | null>(null);
 
   useEffect(() => {
-    api.adminListAuditLogs().then(setLogs).catch((err) => {
-      onError(err instanceof APIError ? err.message : "Could not load audit logs.");
-    });
+    api
+      .adminListAuditLogs()
+      .then(setLogs)
+      .catch((err) => onError(err instanceof APIError ? err.message : "Failed to load audit logs."));
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  if (!logs) return <p className="text-muted text-sm">Loading…</p>;
+  if (logs === null) return <p className="text-muted text-sm">Loading…</p>;
 
   return (
-    <div className="card overflow-x-auto">
-      <table className="w-full text-sm">
-        <thead>
-          <tr className="text-left text-muted border-b border-border">
-            <th className="py-2 pr-4">When</th>
-            <th className="py-2 pr-4">Actor</th>
-            <th className="py-2 pr-4">Action</th>
-            <th className="py-2">Result</th>
-          </tr>
-        </thead>
-        <tbody>
-          {logs.map((l) => (
-            <tr key={l.id} className="border-b border-border last:border-0">
-              <td className="py-2 pr-4 whitespace-nowrap">{formatDate(l.created_at)}</td>
-              <td className="py-2 pr-4">{l.user_email ?? "—"}</td>
-              <td className="py-2 pr-4">{l.action}{l.resource ? ` · ${l.resource}` : ""}</td>
-              <td className="py-2 text-muted capitalize">{l.result}</td>
-            </tr>
-          ))}
-        </tbody>
-      </table>
+    <div className="space-y-1">
+      {logs.map((log) => (
+        <div key={log.id} className="card flex items-center justify-between gap-4 py-2">
+          <div className="min-w-0 flex items-center gap-3">
+            <span
+              className={`text-xs px-2 py-0.5 rounded font-mono uppercase shrink-0 ${
+                log.result === "SUCCESS"
+                  ? "bg-active/15 text-active"
+                  : log.result === "DENIED"
+                  ? "bg-pending/15 text-pending"
+                  : "bg-danger/15 text-danger"
+              }`}
+            >
+              {log.result}
+            </span>
+            <p className="text-sm font-mono truncate">{log.action}</p>
+            <p className="text-xs text-muted truncate">{log.user_email || log.user_id}</p>
+          </div>
+          <p className="text-xs text-muted font-mono shrink-0">{formatDate(log.created_at)}</p>
+        </div>
+      ))}
+      {logs.length === 0 && <p className="text-muted text-sm">No activity yet.</p>}
     </div>
   );
 }

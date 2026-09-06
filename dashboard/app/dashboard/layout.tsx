@@ -29,11 +29,6 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
   }
 
   const isAdmin = user.role === "admin" || user.role === "super_admin";
-  // Admin now lives at the separate /admin route/layout (its own auth guard,
-  // its own shell) rather than as tabs inside this user dashboard — an
-  // admin who wants platform controls follows this one link out, they don't
-  // see admin-only nav items mixed into their regular dashboard.
-  const nav = NAV;
 
   return (
     <div className="min-h-screen flex">
@@ -46,7 +41,7 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
         </div>
 
         <nav className="flex-1 px-2 py-4 space-y-1">
-          {nav.map((item) => {
+          {NAV.map((item) => {
             const active = pathname === item.href;
             return (
               <Link
@@ -64,8 +59,13 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
 
         <div className="px-4 py-4 border-t border-border space-y-2">
           {isAdmin && (
-            <Link href="/admin" className="block text-xs text-accent hover:underline">
-              Admin dashboard →
+            // Deliberately not part of NAV above (spec section 23: a
+            // separate destination, not a same-shell nav item) — this is
+            // the one deliberate crossover link, styled distinctly so
+            // it reads as "leave to a different area" rather than just
+            // another page in this sidebar.
+            <Link href="/admin" className="btn-secondary w-full text-sm block text-center border-red-500/30 text-red-300">
+              Admin →
             </Link>
           )}
           <p className="text-xs text-muted truncate">{user.email}</p>

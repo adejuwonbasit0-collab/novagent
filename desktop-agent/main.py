@@ -4,15 +4,37 @@ import asyncio
 import sys
 import threading
 
+from PySide6.QtCore import QThread, QTimer, Signal
 from PySide6.QtWidgets import QApplication
 
 from core.api_client import NovaAPIClient
+from core.conversation_state import ConversationState
 from core.device_store import DeviceStore
 from core.ws_client import DeviceWebSocketClient
-from ui.bubble import AgentState, AssistantBubble
+from ui.bubble import AssistantBubble
 from ui.chat_panel import ChatPanel
 from ui.onboarding import OnboardingDialog
 from config import settings
+
+HEALTH_CHECK_INTERVAL_MS = 15000
+
+
+class HealthCheckWorker(QThread):
+    """One-shot connectivity probe, fired on a timer rather than kept as a
+    persistent thread -- OFFLINE (spec section 36/38) needs to reflect
+    actual reachability, not just 'the WebSocket happens to be connected
+    right now', so this hits the same REST endpoint any other request
+    would use."""
+
+    result = Signal(bool)
+
+    def __init__(self, client: NovaAPIClient):
+        super().__init__()
+        self._client = client
+
+    def run(self) -> None:
+        ok = asyncio.run(self._client.health_check())
+        self.result.emit(ok)
 
 
 class NovaAgentApp:
@@ -27,6 +49,10 @@ class NovaAgentApp:
 
         self.ws_client = DeviceWebSocketClient()
         self._ws_thread: threading.Thread | None = None
+        self._health_worker: HealthCheckWorker | None = None
+        self._health_timer = QTimer()
+        self._health_timer.setInterval(HEALTH_CHECK_INTERVAL_MS)
+        self._health_timer.timeout.connect(self._run_health_check)
 
         self.bubble.clicked.connect(self._toggle_chat_panel)
         self.bubble.move(100, 100)
@@ -36,12 +62,17 @@ class NovaAgentApp:
             self.chat_panel.stop_listening()
             if self.chat_panel._voice_listener is not None:
                 self.chat_panel._voice_listener.wait(2000)
+            if self.chat_panel._sync_worker.isRunning():
+                self.chat_panel._sync_worker.wait(3000)
+        if self._health_worker is not None and self._health_worker.isRunning():
+            self._health_worker.wait(3000)
         self.ws_client.stop()
 
     def _toggle_chat_panel(self) -> None:
         if self.chat_panel is None:
             self.chat_panel = ChatPanel(self.client)
-            self.chat_panel.state_changed.connect(self.bubble.set_state)
+            self.chat_panel.fsm.state_changed.connect(self.bubble.set_state)
+            self._wire_bubble_controls()
 
         if self.chat_panel.isVisible():
             self.chat_panel.hide()
@@ -49,6 +80,16 @@ class NovaAgentApp:
             self.chat_panel.show()
             self.chat_panel.raise_()
             self.chat_panel.input.setFocus()
+
+    def _wire_bubble_controls(self) -> None:
+        """Spec section 37: the bubble's own Pause/Resume/Stop menu
+        controls the same ConversationStateMachine everything else reacts
+        to -- VoiceListener already checks fsm.is_paused/is_stopped every
+        loop iteration, so these take effect within one recording cycle
+        without needing to reach into the listener thread directly."""
+        self.bubble.pause_requested.connect(self.chat_panel.fsm.pause)
+        self.bubble.resume_requested.connect(self.chat_panel.fsm.start)
+        self.bubble.stop_requested.connect(self.chat_panel.fsm.stop)
 
     def _run_onboarding_if_needed(self) -> bool:
         if DeviceStore.is_registered():
@@ -71,6 +112,19 @@ class NovaAgentApp:
         self._ws_thread = threading.Thread(target=_thread_main, daemon=True)
         self._ws_thread.start()
 
+    def _run_health_check(self) -> None:
+        if self._health_worker is not None and self._health_worker.isRunning():
+            return  # previous probe still in flight -- skip this tick rather than piling up workers
+        self._health_worker = HealthCheckWorker(self.client)
+        self._health_worker.result.connect(self._on_health_result)
+        self._health_worker.start()
+
+    def _on_health_result(self, reachable: bool) -> None:
+        if self.chat_panel is not None:
+            self.chat_panel.fsm.set_offline(not reachable)
+        else:
+            self.bubble.set_state(ConversationState.OFFLINE if not reachable else ConversationState.IDLE)
+
     def run(self) -> int:
         if not self._run_onboarding_if_needed():
             return 0  # user closed the login dialog without completing it
@@ -83,12 +137,15 @@ class NovaAgentApp:
         # Keep the listener alive with the agent, not with the optional chat
         # window. The user can still stop it from the panel when needed.
         self.chat_panel = ChatPanel(self.client)
-        self.chat_panel.state_changed.connect(self.bubble.set_state)
+        self.chat_panel.fsm.state_changed.connect(self.bubble.set_state)
+        self._wire_bubble_controls()
         self.chat_panel.start_listening()
 
         self._start_ws_client()
+        self._health_timer.start()
+        self._run_health_check()  # don't wait a full interval for the first reading
 
-        self.bubble.set_state(AgentState.IDLE)
+        self.bubble.set_state(ConversationState.IDLE)
         self.bubble.show()
         return self.app.exec()
 
