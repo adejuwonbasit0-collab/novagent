@@ -7,6 +7,21 @@ import os
 from os_control.base import OSActionResult, OSController
 
 
+def _applescript_string(value: str) -> str:
+    """
+    Escape a Python string for safe interpolation inside a double-quoted
+    AppleScript string literal, then wrap it in the quotes.
+
+    `text` and `message`/`title` below are model/user-controlled. Without
+    this, a value like `foo" & do shell script "rm -rf ~" & "` would break
+    out of the AppleScript string literal and `do shell script` would run
+    arbitrary shell commands as the logged-in user. AppleScript only needs
+    backslash and double-quote escaped inside a "..." literal.
+    """
+    escaped = value.replace("\\", "\\\\").replace('"', '\\"')
+    return f'"{escaped}"'
+
+
 class MacOSController(OSController):
     def open_application(self, app_name: str) -> OSActionResult:
         try:
@@ -55,7 +70,7 @@ class MacOSController(OSController):
 
     def send_notification(self, title: str, message: str) -> OSActionResult:
         try:
-            script = f'display notification "{message}" with title "{title}"'
+            script = f"display notification {_applescript_string(message)} with title {_applescript_string(title)}"
             subprocess.run(["osascript", "-e", script], check=True)
             return OSActionResult(success=True, message="Notified")
         except Exception as e:
@@ -70,7 +85,13 @@ class MacOSController(OSController):
 
     def type_text(self, text: str) -> OSActionResult:
         try:
-            subprocess.run(["osascript", "-e", f'tell application "System Events" to keystroke {text!r}'], check=True)
+            # Previously used Python's repr() (`{text!r}`), which produces
+            # Python single-quote syntax — not valid AppleScript string
+            # escaping, and not a safe escape against AppleScript injection
+            # either. Use the same AppleScript-string escaper as
+            # send_notification instead.
+            script = f"tell application \"System Events\" to keystroke {_applescript_string(text)}"
+            subprocess.run(["osascript", "-e", script], check=True)
             return OSActionResult(success=True, message="Typed the requested text")
         except Exception as e:
             return OSActionResult(success=False, message="", error=str(e))
