@@ -29,7 +29,11 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
   }
 
   const isAdmin = user.role === "admin" || user.role === "super_admin";
-  const nav = isAdmin ? [...NAV, { href: "/dashboard/admin", label: "Admin" }, { href: "/dashboard/admin/ai-provider", label: "AI Provider" }, { href: "/dashboard/admin/settings", label: "Assistant identity" }] : NAV;
+  // Admin now lives at the separate /admin route/layout (its own auth guard,
+  // its own shell) rather than as tabs inside this user dashboard — an
+  // admin who wants platform controls follows this one link out, they don't
+  // see admin-only nav items mixed into their regular dashboard.
+  const nav = NAV;
 
   return (
     <div className="min-h-screen flex">
@@ -58,8 +62,13 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
           })}
         </nav>
 
-        <div className="px-4 py-4 border-t border-border">
-          <p className="text-xs text-muted truncate mb-2">{user.email}</p>
+        <div className="px-4 py-4 border-t border-border space-y-2">
+          {isAdmin && (
+            <Link href="/admin" className="block text-xs text-accent hover:underline">
+              Admin dashboard →
+            </Link>
+          )}
+          <p className="text-xs text-muted truncate">{user.email}</p>
           <button onClick={logout} className="btn-secondary w-full text-sm">
             Sign out
           </button>

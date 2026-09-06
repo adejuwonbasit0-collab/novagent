@@ -67,3 +67,31 @@ export function useRequireAuth() {
 
   return { user, loading };
 }
+
+/**
+ * Redirects to /login if there's no authenticated user, and to /dashboard if
+ * the authenticated user isn't an admin/super_admin. This is the client-side
+ * gate for the entire /admin route group — it exists purely for UX (so a
+ * non-admin never even sees an admin layout flash by). It is NOT the real
+ * security boundary: every admin API route independently checks the role
+ * server-side via get_current_admin and returns 403 regardless of what the
+ * client does, so a normal user can never reach admin functionality by
+ * hitting the API directly or editing the URL.
+ */
+export function useRequireAdmin() {
+  const { user, loading } = useAuth();
+  const router = useRouter();
+
+  useEffect(() => {
+    if (loading) return;
+    if (!user) {
+      router.replace("/login");
+      return;
+    }
+    if (user.role !== "admin" && user.role !== "super_admin") {
+      router.replace("/dashboard");
+    }
+  }, [loading, user, router]);
+
+  return { user, loading, isAdmin: !!user && (user.role === "admin" || user.role === "super_admin") };
+}
