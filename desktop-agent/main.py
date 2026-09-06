@@ -64,6 +64,7 @@ class NovaAgentApp:
                 self.chat_panel._voice_listener.wait(2000)
             if self.chat_panel._sync_worker.isRunning():
                 self.chat_panel._sync_worker.wait(3000)
+            self.chat_panel._speech.shutdown()
         if self._health_worker is not None and self._health_worker.isRunning():
             self._health_worker.wait(3000)
         self.ws_client.stop()

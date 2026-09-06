@@ -12,11 +12,13 @@ from PySide6.QtWidgets import (
 
 from core.api_client import ChatReply, NovaAPIClient, ToolCallResult
 from core.conversation_state import ConversationState, ConversationStateMachine
-from core.local_router import route_locally
-from core.voice import SpeechSpeaker, VoiceListener
+from core.voice import VoiceListener
 from core.speaker_verification import SpeakerVerifier
+from core.speech_manager import SpeechManager
 from ui.voice_enrollment import VoiceEnrollmentDialog
 from config import settings
+import re
+from pathlib import Path
 
 
 class SpeakerSyncWorker(QThread):
@@ -105,13 +107,34 @@ class DirectToolWorker(QThread):
             self.failed.emit(str(exc))
 
 
+def _local_command(message: str) -> tuple[str, dict] | None:
+    """Recognize deterministic computer actions without asking an LLM."""
+    text = message.strip()
+    lowered = text.lower()
+    if re.search(r"\b(open|launch|start)\b.*\b(chrome|google chrome)\b", lowered):
+        return "open_application", {"app_name": "chrome"}
+    if re.search(r"\b(open|launch)\b.*\b(notepad)\b", lowered):
+        return "open_application", {"app_name": "notepad.exe"}
+    if lowered in {"open settings", "go to settings"}:
+        return "open_application", {"app_name": "ms-settings:"}
+    if lowered in {"open control panel", "go to control panel"}:
+        return "open_application", {"app_name": "control.exe"}
+    code_match = re.search(r"(?:open|launch) (.+?) in (?:visual studio code|vs code|vscode)$", text, re.I)
+    if code_match:
+        return "open_folder_in_application", {"path": code_match.group(1).strip().strip('"'), "app_name": "Visual Studio Code"}
+    folder_match = re.search(r"(?:create|make) (?:a )?folder(?: named| called)?\s+(.+)$", text, re.I)
+    if folder_match:
+        name = folder_match.group(1).strip().strip('"')
+        return "create_folder", {"path": str(Path.home() / "Desktop" / name)}
+    return None
+
+
 class ChatPanel(QWidget):
     def __init__(self, client: NovaAPIClient):
         super().__init__()
         self._client = client
         self._worker: QThread | None = None
         self._voice_listener: VoiceListener | None = None
-        self._speaker: SpeechSpeaker | None = None
 
         # Single source of truth for "what is Nova doing right now" (spec
         # section 36) -- the bubble, this panel, and VoiceListener all
@@ -121,6 +144,7 @@ class ChatPanel(QWidget):
         # controls (spec section 37).
         self.fsm = ConversationStateMachine()
         self.fsm.state_changed.connect(self._on_fsm_state_changed)
+        self._speech = SpeechManager(self.fsm)
 
         self._verifier = SpeakerVerifier()
         self._sync_worker = SpeakerSyncWorker(self._verifier, client)
@@ -233,11 +257,7 @@ class ChatPanel(QWidget):
             self._speak(text)
 
     def _speak(self, text: str) -> None:
-        if not text:
-            self.fsm.on_response_complete()  # nothing to say -- don't leave the FSM stuck mid-turn
-            return
-        self._speaker = SpeechSpeaker(text, self.fsm)
-        self._speaker.start()
+        self._speech.speak(text)
 
     def _on_submit(self) -> None:
         message = self.input.text().strip()
@@ -246,30 +266,29 @@ class ChatPanel(QWidget):
         self._submit_message(message)
 
     def _submit_message(self, message: str) -> None:
+        # Same crash class as the SpeechManager fix above, different
+        # attribute: self._worker gets reassigned on every call, and a
+        # second voice-triggered command arriving while the first is
+        # still in flight (e.g. two quick follow-ups in one active-
+        # conversation session, backend still answering the first) would
+        # silently drop the reference to a still-running QThread and
+        # crash the same way. The Send button being disabled only stops
+        # a second *manual* click -- it doesn't stop a second transcript
+        # arriving from VoiceListener, so that path needs its own guard.
+        if self._worker is not None and self._worker.isRunning():
+            self._append("Nova", "Still working on the last request — one moment.")
+            return
+
         self._append("You", message)
         self.input.clear()
         self.input.setEnabled(False)
         self.send_btn.setEnabled(False)
 
-        routed = route_locally(message)
-        if isinstance(routed, dict) and "unsupported" in routed:
-            # Recognized as a local-sounding request for a capability that
-            # doesn't exist end-to-end yet (spec section 47: never let a
-            # button — or in this case, a spoken command — pretend to
-            # work). Answered directly, zero network calls, rather than
-            # falling through to the cloud LLM, which has no tool for this
-            # either and might otherwise produce a reply implying it
-            # happened.
-            self._append("Nova", routed["unsupported"])
-            self._speak(routed["unsupported"])
-            self.input.setEnabled(True)
-            self.send_btn.setEnabled(True)
-            self.fsm.on_response_complete()
-            return
-
-        if routed is not None:
+        direct = _local_command(message)
+        if direct:
+            tool_name, params = direct
             self.fsm.on_executing()
-            self._worker = DirectToolWorker(self._client, routed.tool_name, routed.params)
+            self._worker = DirectToolWorker(self._client, tool_name, params)
             self._worker.finished_ok.connect(self._on_direct_reply)
             self._worker.failed.connect(self._on_error)
             self._worker.start()
@@ -299,21 +318,6 @@ class ChatPanel(QWidget):
         self.send_btn.setEnabled(True)
 
     def _on_direct_reply(self, result: ToolCallResult) -> None:
-        # Previously this branch had no REQUIRES_CONFIRMATION case at all,
-        # so a locally fast-pathed high-risk tool (e.g. "shut down my
-        # computer", matched below without ever going through the LLM)
-        # fell into the generic failure branch and told the user Nova
-        # "could not complete" the request -- even though the server
-        # correctly withheld the action pending confirmation and a Yes/No
-        # dialog was the right next step, exactly as it already is for the
-        # LLM/chat path below. Route it through the same handler so a
-        # fast-pathed command gets the same real confirmation dialog.
-        if result.result == "REQUIRES_CONFIRMATION":
-            self._handle_confirmation_needed(result)
-            self.input.setEnabled(True)
-            self.send_btn.setEnabled(True)
-            return
-
         if result.result == "SUCCESS":
             message = result.message or f"Done: {result.tool_name}"
         elif result.result == "DENIED":
@@ -362,4 +366,5 @@ class ChatPanel(QWidget):
         if self._voice_listener is not None:
             self._voice_listener.wait(2000)
             self._voice_listener = None
+        self._speech.shutdown()
         event.accept()
