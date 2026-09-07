@@ -4,8 +4,55 @@ import os
 import subprocess
 import webbrowser
 import shutil
+import time
 
 from os_control.base import OSActionResult, OSController
+
+# Real bug found on audit: open_application returned success the instant
+# os.startfile() was called, with no wait for the new window to actually
+# exist and take focus. type_text (pyautogui.write) types into whatever
+# window currently has OS focus at the moment it runs -- it has no idea
+# what "the app we just opened" even is. The orchestrator awaits
+# open_application's response before sending type_text, so the network
+# round-trip is properly sequenced, but that response was meaningless: it
+# only confirmed the OS accepted the launch request, not that the app's
+# window exists yet. Cold-starting an app (Notepad from a fresh process,
+# and especially anything heavier) can easily take longer than the gap
+# between the two commands, so type_text fires into whatever WAS focused
+# before -- which reads as "Nova did nothing," since nothing visibly
+# happens in the window the user is looking at.
+#
+# Fixed by polling the actual Win32 foreground window handle after
+# launching, and only returning success once it has changed (a new window
+# took focus) or a bounded timeout elapses. This is still a heuristic --
+# it confirms *some* new window took focus, not specifically that it
+# belongs to the app that was just launched (a notification popping up at
+# the same moment would also count) -- but it's a real signal instead of
+# none, and closes the common case this bug was reported against.
+_FOREGROUND_POLL_TIMEOUT_S = 4.0
+_FOREGROUND_POLL_INTERVAL_S = 0.1
+
+
+def _get_foreground_window():
+    try:
+        import ctypes
+
+        return ctypes.windll.user32.GetForegroundWindow()
+    except Exception:
+        return None
+
+
+def _wait_for_new_foreground_window(previous_hwnd) -> None:
+    if previous_hwnd is None:
+        # ctypes/user32 unavailable for some reason -- fall back to a fixed
+        # settle delay rather than returning with no wait at all.
+        time.sleep(0.6)
+        return
+    deadline = time.monotonic() + _FOREGROUND_POLL_TIMEOUT_S
+    while time.monotonic() < deadline:
+        if _get_foreground_window() != previous_hwnd:
+            return
+        time.sleep(_FOREGROUND_POLL_INTERVAL_S)
 
 
 class WindowsController(OSController):
@@ -18,7 +65,9 @@ class WindowsController(OSController):
                 "settings": "ms-settings:",
                 "control panel": "control.exe",
             }
+            previous_hwnd = _get_foreground_window()
             os.startfile(aliases.get(app_name.lower().strip(), app_name))  # type: ignore[attr-defined]
+            _wait_for_new_foreground_window(previous_hwnd)
             return OSActionResult(success=True, message=f"Opened {app_name}")
         except Exception as e:
             return OSActionResult(success=False, message="", error=str(e))
@@ -74,6 +123,22 @@ class WindowsController(OSController):
         try:
             os.makedirs(os.path.expandvars(os.path.expanduser(path)), exist_ok=True)
             return OSActionResult(success=True, message=f"Created folder {path}")
+        except Exception as e:
+            return OSActionResult(success=False, message="", error=str(e))
+
+    def create_file(self, path: str, content: str = "") -> OSActionResult:
+        try:
+            full_path = os.path.expandvars(os.path.expanduser(path))
+            if os.path.exists(full_path):
+                return OSActionResult(
+                    success=False, message="", error=f"A file already exists at {path} -- not overwriting it."
+                )
+            parent = os.path.dirname(full_path)
+            if parent:
+                os.makedirs(parent, exist_ok=True)
+            with open(full_path, "w", encoding="utf-8") as f:
+                f.write(content)
+            return OSActionResult(success=True, message=f"Created {path}")
         except Exception as e:
             return OSActionResult(success=False, message="", error=str(e))
 

@@ -1,28 +1,41 @@
 from __future__ import annotations
 
-import logging
-import time
-
 from PySide6.QtCore import QThread, Signal
+import time
 
 from core.conversation_state import ConversationStateMachine
 from core.speaker_verification import SpeakerVerifier
-from core.thread_safety import log_thread_event
-
-logger = logging.getLogger("nova.threads")
 
 
 class VoiceListener(QThread):
     transcript = Signal(str)
     status = Signal(str)
     failed = Signal(str)
-    # Emitted once, right before entering the listen loop, after imports
-    # and the recognizer have been constructed successfully -- this is
-    # what main.py waits for before announcing "I'm listening for Nova"
-    # instead of speaking that immediately at start_listening() and hoping
-    # initialization happens to succeed a moment later (spec: never speak
-    # before the audio system is confirmed ready).
-    ready = Signal()
+
+    # Previously this thread called self._fsm.on_wake_detected() /
+    # on_verifying() / on_verified() / on_rejected() / on_error() directly
+    # from run() -- i.e. from the worker OS thread. ConversationStateMachine
+    # lives on the main thread and those methods touch a QTimer
+    # (_arm_timeout/_check_timeout) and, in on_rejected(), call
+    # QTimer.singleShot(...) -- both of which are only well-defined when
+    # done on the object's own thread. QTimer.singleShot in particular is
+    # documented as running in the calling thread; called from a QThread
+    # that never runs its own event loop (this one doesn't -- run() is
+    # overridden, exec() is never called), the timer it creates has
+    # nothing to pump it and its callback never fires. Concretely: a
+    # rejected voice would transition to LOCKED and then never
+    # auto-recover back to LISTENING, since the 1200ms singleShot inside
+    # on_rejected() silently never elapses.
+    #
+    # Fixed by emitting signals instead and letting whoever owns both this
+    # listener and the fsm connect them -- cross-thread connections are
+    # queued automatically, so the fsm's own methods (and any QTimer they
+    # touch) only ever run on the thread that actually owns them.
+    wake_detected = Signal()
+    verifying = Signal()
+    verified = Signal(bool)  # has_immediate_command
+    rejected = Signal()
+    continuation = Signal()
 
     def __init__(
         self,
@@ -48,7 +61,6 @@ class VoiceListener(QThread):
             pass
 
     def run(self) -> None:
-        log_thread_event("STARTED", self)
         try:
             import numpy as np
             import sounddevice as sd
@@ -58,8 +70,6 @@ class VoiceListener(QThread):
             recognizer.pause_threshold = 0.8
             recognizer.non_speaking_duration = 0.3
             self.status.emit(f"Listening for {self._wake_name.title()}")
-            self.ready.emit()
-
             while self._running:
                 # Paused/stopped (spec section 37, controlled from the
                 # bubble): release the mic rather than recording into a
@@ -87,6 +97,27 @@ class VoiceListener(QThread):
                 except sr.RequestError as exc:
                     self.status.emit(f"Speech service unavailable: {exc}")
                     continue
+                except Exception as exc:
+                    # THE likely cause of "sometimes it just stops and
+                    # doesn't reply": recognize_google talks to Google's
+                    # free web speech endpoint over plain urllib, and in
+                    # practice raises more than just sr.RequestError on a
+                    # flaky connection -- raw URLError/socket timeouts/
+                    # connection resets are common and are NOT sr.RequestError
+                    # in every version of this library. Before this fix,
+                    # anything other than those two specific exception types
+                    # propagated out of this per-iteration try/except,
+                    # through the while loop, into the outer except at the
+                    # bottom of run() -- which ends run() entirely. One
+                    # transient network hiccup during a single 5-second
+                    # recording cycle would permanently kill the whole
+                    # wake-word loop: no crash, no visible error the user
+                    # would necessarily see (especially voice-only, chat
+                    # panel never opened), just silence forever until the
+                    # app is restarted. A single bad recognition attempt
+                    # should never end the ability to try again.
+                    self.status.emit(f"Speech recognition error: {exc}")
+                    continue
 
                 lowered = words.lower()
                 wake_prefixes = (self._wake_name, f"hey {self._wake_name}")
@@ -101,17 +132,30 @@ class VoiceListener(QThread):
                     # runs on this exact buffer, no extra recording, so
                     # there's no added delay before transcript/unrecognized
                     # follows.
-                    self._fsm.on_wake_detected()
-                    self._fsm.on_verifying()
-                    result = self._verifier.verify(pcm)
+                    self.wake_detected.emit()
+                    self.verifying.emit()
+                    try:
+                        result = self._verifier.verify(pcm)
+                    except Exception as exc:
+                        # Same reasoning as the recognize_google catch above:
+                        # this used to be able to propagate out of the loop
+                        # entirely and end run() on a single bad buffer. Fail
+                        # CLOSED (treat as rejected, not as "skip and keep
+                        # whatever state we had") -- an error computing
+                        # whether the voice matches is not evidence that it
+                        # does, and the security gate (spec section 8) must
+                        # not have a silent bypass.
+                        self.status.emit(f"Speaker verification error: {exc}")
+                        self.rejected.emit()
+                        continue
 
                     if not result.verified:
                         self.status.emit("Voice not recognized.")
-                        self._fsm.on_rejected()
+                        self.rejected.emit()
                         continue  # no session armed, no transcript emitted -- locked out
 
                     has_command = lowered != matched_prefix
-                    self._fsm.on_verified(has_immediate_command=has_command)
+                    self.verified.emit(has_command)
                     if not has_command:
                         self.transcript.emit("")  # bare wake word -- chat panel replies "Yes, I'm listening"
                     else:
@@ -121,11 +165,57 @@ class VoiceListener(QThread):
                     # Continuing an already-verified active conversation
                     # (spec section 6) -- no re-verification per sentence,
                     # only per wake event.
-                    self._fsm.on_continuation()
+                    self.continuation.emit()
                     self.transcript.emit(words)
         except Exception as exc:
-            self._fsm.on_error()
-            logger.exception("[THREAD] VoiceListener.run() raised")
+            # fsm.on_error() is intentionally NOT called here -- it would be
+            # a cross-thread call into a QObject that lives on the main
+            # thread (see the class-level comment). `failed` is already
+            # connected by whoever owns this listener; on_error() belongs
+            # in that (main-thread) handler instead.
             self.failed.emit(str(exc))
+
+
+class SpeechSpeaker(QThread):
+    finished_speaking = Signal()
+
+    def __init__(self, text: str, fsm: ConversationStateMachine | None = None):
+        super().__init__()
+        self._text = text
+        self._fsm = fsm
+
+    def run(self) -> None:
+        # pyttsx3 on Windows drives SAPI5 through COM, and COM requires
+        # each thread that touches it to initialize its own apartment
+        # first. pyttsx3.init() from a QThread with no CoInitialize() call
+        # is a separate, well-documented native crash source on Windows —
+        # distinct from (but easy to mistake for) the QThread-lifetime bug
+        # SpeechManager fixes, since it also only shows up when TTS runs
+        # on a background thread and can present the same way (something
+        # gets spoken, then the process dies). pythoncom only exists on
+        # Windows (it ships with pywin32); everywhere else this is a no-op.
+        com_initialized = False
+        try:
+            import pythoncom
+
+            pythoncom.CoInitialize()
+            com_initialized = True
+        except ImportError:
+            pass  # not on Windows, or pywin32 isn't installed — nothing to do
+
+        try:
+            if self._fsm is not None:
+                self._fsm.on_speaking()
+            import pyttsx3
+
+            engine = pyttsx3.init()
+            engine.say(self._text)
+            engine.runAndWait()
         finally:
-            log_thread_event("STOPPED", self)
+            if com_initialized:
+                import pythoncom
+
+                pythoncom.CoUninitialize()
+            if self._fsm is not None:
+                self._fsm.on_response_complete()
+            self.finished_speaking.emit()

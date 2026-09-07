@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import logging
-
 from PySide6.QtCore import Qt, QThread, QTimer, Signal
 from PySide6.QtWidgets import (
     QLineEdit,
@@ -13,42 +11,11 @@ from PySide6.QtWidgets import (
 )
 
 from core.api_client import ChatReply, NovaAPIClient, ToolCallResult
-from core.conversation_state import ConversationState, ConversationStateMachine
-from core.voice import VoiceListener
-from core.speaker_verification import SpeakerVerifier
-from core.speech_manager import SpeechManager
+from core.conversation_state import ConversationState
+from core.voice_service import VoiceService
 from core.local_router import route_locally
-from core.thread_safety import log_thread_event, stop_and_release
 from ui.voice_enrollment import VoiceEnrollmentDialog
 from config import settings
-
-logger = logging.getLogger("nova.threads")
-
-
-class SpeakerSyncWorker(QThread):
-    """Pulls the current speaker-verification template from the backend at
-    startup so the gate reflects whatever was last enrolled/reset -- from
-    this device or another one, or via the dashboard. Runs once per app
-    launch; verify() itself never touches the network (see SpeakerVerifier)."""
-
-    finished_sync = Signal()
-
-    def __init__(self, verifier: SpeakerVerifier, client: NovaAPIClient):
-        super().__init__()
-        self._verifier = verifier
-        self._client = client
-
-    def run(self) -> None:
-        log_thread_event("STARTED", self)
-        import asyncio
-
-        try:
-            asyncio.run(self._verifier.sync_from_backend(self._client))
-        except Exception:
-            pass  # offline at startup -- fall back to whatever's already cached locally
-        finally:
-            log_thread_event("STOPPED", self)
-            self.finished_sync.emit()
 
 
 class ChatWorker(QThread):
@@ -65,7 +32,6 @@ class ChatWorker(QThread):
         self._message = message
 
     def run(self) -> None:
-        log_thread_event("STARTED", self)
         import asyncio
 
         try:
@@ -73,8 +39,6 @@ class ChatWorker(QThread):
             self.finished_ok.emit(reply)
         except Exception as e:
             self.failed.emit(str(e))
-        finally:
-            log_thread_event("STOPPED", self)
 
 
 class ConfirmWorker(QThread):
@@ -87,7 +51,6 @@ class ConfirmWorker(QThread):
         self._pending_id = pending_id
 
     def run(self) -> None:
-        log_thread_event("STARTED", self)
         import asyncio
 
         try:
@@ -95,8 +58,6 @@ class ConfirmWorker(QThread):
             self.finished_ok.emit(result)
         except Exception as e:
             self.failed.emit(str(e))
-        finally:
-            log_thread_event("STOPPED", self)
 
 
 class DirectToolWorker(QThread):
@@ -110,7 +71,6 @@ class DirectToolWorker(QThread):
         self._params = params
 
     def run(self) -> None:
-        log_thread_event("STARTED", self)
         import asyncio
 
         try:
@@ -118,30 +78,35 @@ class DirectToolWorker(QThread):
             self.finished_ok.emit(result)
         except Exception as exc:
             self.failed.emit(str(exc))
-        finally:
-            log_thread_event("STOPPED", self)
 
 
 class ChatPanel(QWidget):
-    def __init__(self, client: NovaAPIClient):
+    """
+    Spec section 9: this is an OPTIONAL UI window. It no longer owns the
+    voice listener, speech manager, or speaker verifier -- those live in
+    the VoiceService passed in here, which NovaAgentApp constructs and
+    keeps running for the lifetime of the whole agent process. Closing or
+    destroying this panel can therefore never touch (let alone crash)
+    the actual listening pipeline; this class only observes it (via
+    voice_service's signals) and drives it (via its start/stop/speak
+    methods) on behalf of whatever's visible in this window.
+    """
+
+    def __init__(self, client: NovaAPIClient, voice_service: VoiceService):
         super().__init__()
         self._client = client
         self._worker: QThread | None = None
-        self._voice_listener: VoiceListener | None = None
+        self._voice_service = voice_service
 
         # Single source of truth for "what is Nova doing right now" (spec
-        # section 36) -- the bubble, this panel, and VoiceListener all
-        # react to or drive the same instance rather than each tracking
-        # their own notion of state. Public so main.py can wire it
-        # straight to the bubble and to the bubble's Pause/Resume/Stop
-        # controls (spec section 37).
-        self.fsm = ConversationStateMachine()
+        # section 36) -- owned by VoiceService now, not this panel, so the
+        # bubble keeps reacting to it even while this panel doesn't exist.
+        self.fsm = voice_service.fsm
         self.fsm.state_changed.connect(self._on_fsm_state_changed)
-        self._speech = SpeechManager(self.fsm)
-
-        self._verifier = SpeakerVerifier()
-        self._sync_worker = SpeakerSyncWorker(self._verifier, client)
-        self._sync_worker.start()
+        voice_service.transcript.connect(self._on_voice_transcript)
+        voice_service.status.connect(self._on_voice_status)
+        voice_service.error.connect(self._on_voice_error)
+        voice_service.listening_changed.connect(self._on_listening_changed)
 
         self.setWindowFlags(Qt.WindowType.Tool | Qt.WindowType.WindowStaysOnTopHint)
         self.setWindowTitle("Nova")
@@ -171,24 +136,6 @@ class ChatPanel(QWidget):
         self.voice_setup_btn.clicked.connect(self._open_voice_enrollment)
         layout.addWidget(self.voice_setup_btn)
 
-    def start_listening(self) -> None:
-        if not self.listen_btn.isChecked():
-            self.listen_btn.setChecked(True)
-            # Do NOT speak here. Previously this spoke "I'm listening for
-            # Nova" immediately, before the microphone/speech-recognition
-            # stack in VoiceListener had actually finished initializing --
-            # if anything in that init failed or was still mid-import when
-            # a second _speak() or an error path fired moments later, that
-            # was the exact race that produced overlapping/mismanaged
-            # speech threads. Now the greeting is deferred to
-            # _on_voice_ready, which only fires once VoiceListener's own
-            # run() has successfully imported everything and constructed
-            # its recognizer -- confirmed ready, not just "started."
-
-    def stop_listening(self) -> None:
-        if self.listen_btn.isChecked():
-            self.listen_btn.setChecked(False)
-
     def _append(self, who: str, text: str) -> None:
         self.history.append(f"<b>{who}:</b> {text}")
 
@@ -211,69 +158,54 @@ class ChatPanel(QWidget):
             self.listen_btn.setText(f"Listening for {settings.ASSISTANT_NAME}")
 
     def _open_voice_enrollment(self) -> None:
-        was_listening = self.listen_btn.isChecked()
+        was_listening = self._voice_service.is_listening
         if was_listening:
-            self.listen_btn.setChecked(False)  # pause wake-word listening while the mic is used for enrollment
+            self._voice_service.stop_listening()  # pause wake-word listening while the mic is used for enrollment
 
-        dialog = VoiceEnrollmentDialog(self._client, self._verifier)
+        dialog = VoiceEnrollmentDialog(self._client, self._voice_service.verifier)
         dialog.exec()
 
         if was_listening:
-            self.listen_btn.setChecked(True)
+            self._voice_service.start_listening()
 
     def _toggle_voice(self, enabled: bool) -> None:
-        if enabled:
-            self._voice_listener = VoiceListener(settings.ASSISTANT_NAME, self._verifier, self.fsm, settings.VOICE_LANGUAGE)
-            self._voice_listener.transcript.connect(self._on_voice_transcript)
-            self._voice_listener.status.connect(self._on_voice_status)
-            self._voice_listener.failed.connect(self._on_voice_error)
-            self._voice_listener.ready.connect(self._on_voice_ready)
-            self._voice_listener.finished.connect(lambda: self.listen_btn.setChecked(False))
-            self._voice_listener.start()
-            self.fsm.start()
-        elif self._voice_listener:
-            # `sd.rec()` inside VoiceListener.run() blocks for up to 5
-            # seconds per cycle; stop() calls sd.stop() to abort that
-            # blocking call from here, but that's not instantaneous.
-            # stop_and_release (core/thread_safety.py) is the one place
-            # this "wait, then only release if actually finished" logic
-            # lives now -- see that module's docstring for why this used
-            # to be reimplemented ad hoc in three different places, and
-            # why one of those three (closeEvent) still had the broken
-            # version until this change.
-            listener = self._voice_listener
-            stop_and_release(listener, listener.stop, 6000, lambda: setattr(self, "_voice_listener", None))
-            self.fsm.stop()
+        # The button only ever drives the shared VoiceService now -- it
+        # doesn't create or own a VoiceListener itself (spec section 9).
+        # _on_listening_changed (below) is what keeps the button's own
+        # checked state honest afterwards, including when the change
+        # originated elsewhere (the bubble's Stop, a startup failure).
+        if enabled and not self._voice_service.is_listening:
+            self._voice_service.start_listening()
+        elif not enabled and self._voice_service.is_listening:
+            self._voice_service.stop_listening()
 
-    def _on_voice_ready(self) -> None:
-        # Fires once per VoiceListener, right before it enters its listen
-        # loop -- this is the actual "audio system confirmed ready"
-        # moment, not just "the thread object was started."
-        self._speak(f"I'm listening for {settings.ASSISTANT_NAME}.")
+    def _on_listening_changed(self, listening: bool) -> None:
+        self.listen_btn.blockSignals(True)
+        self.listen_btn.setChecked(listening)
+        self.listen_btn.blockSignals(False)
 
     def _on_voice_transcript(self, message: str) -> None:
-        # WAKE_DETECTED/VERIFYING/rejection are handled inside VoiceListener
-        # via direct fsm calls (core/voice.py) -- by the time a transcript
-        # reaches here, verification already passed.
+        # WAKE_DETECTED/VERIFYING/rejection are dispatched via VoiceListener's
+        # signals (connected to the fsm inside VoiceService) -- by the time
+        # a transcript reaches here, verification already passed.
         if not message:
             self._speak(f"Yes, I'm listening.")
             return
         self._submit_message(message)
 
     def _on_voice_error(self, error: str) -> None:
-        self.listen_btn.setChecked(False)
         self._append("Nova", f"Microphone error: {error}")
         self._speak(f"I cannot use the microphone. {error}")
 
     def _on_voice_status(self, text: str) -> None:
-        if not self.listen_btn.isChecked():
+        if not self._voice_service.is_listening:
             return
         if text.startswith("Speech service unavailable") or text.startswith("Microphone"):
             self._append("Nova", text)
             self._speak(text)
 
     def _speak(self, text: str) -> None:
-        self._speech.speak(text)
+        self._voice_service.speak(text)
 
     def _on_submit(self) -> None:
         message = self.input.text().strip()
@@ -291,8 +223,16 @@ class ChatPanel(QWidget):
         # crash the same way. The Send button being disabled only stops
         # a second *manual* click -- it doesn't stop a second transcript
         # arriving from VoiceListener, so that path needs its own guard.
+        #
+        # This branch used to only _append() (write to the chat log), never
+        # _speak() -- for someone using this purely by voice, with the chat
+        # window never opened, a command that arrived mid-reply produced
+        # total silence. That reads exactly like "it just stopped and
+        # didn't reply," even though the app was working correctly and
+        # simply hadn't finished the previous request yet.
         if self._worker is not None and self._worker.isRunning():
             self._append("Nova", "Still working on the last request — one moment.")
+            self._speak("One moment, I'm still working on that.")
             return
 
         self._append("You", message)
@@ -402,17 +342,13 @@ class ChatPanel(QWidget):
             self._append("Nova", "Okay, I won't do that.")
 
     def closeEvent(self, event) -> None:  # noqa: N802
-        # Previously: `self._voice_listener.wait(2000)` followed by an
-        # UNCONDITIONAL `self._voice_listener = None` regardless of
-        # whether wait() actually succeeded. sd.rec() can block up to 5s,
-        # so a 2s wait routinely timed out, and this then dropped the
-        # reference to a QThread that was, provably, still running --
-        # exactly the bug this whole file has been fixed for twice
-        # already in other methods (_toggle_voice's off-branch,
-        # main.py's _shutdown_threads), just missed here. Routed through
-        # the same shared helper now so this can't happen a third time.
-        self.stop_listening()
-        listener = self._voice_listener
-        stop_and_release(listener, (listener.stop if listener else lambda: None), 6000, lambda: setattr(self, "_voice_listener", None))
-        self._speech.shutdown()
+        # Spec section 9, made concrete: this window closing must not
+        # touch the voice pipeline at all. The old version stopped
+        # VoiceListener here (and had its own version of the "drop a
+        # possibly-still-running QThread reference" bug on top of that,
+        # since it duplicated -- and only partially matched -- the fix
+        # already applied in _toggle_voice). VoiceService now owns that
+        # lifecycle independently of this panel's existence, so closing
+        # the chat window is just a normal window close: hide, nothing
+        # more.
         event.accept()

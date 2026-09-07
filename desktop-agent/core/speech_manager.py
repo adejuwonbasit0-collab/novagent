@@ -1,140 +1,94 @@
 from __future__ import annotations
 
-"""
-A SINGLE, long-lived TTS worker thread for the entire app lifetime,
-created once and never recreated -- per explicit direction: "There must
-never be multiple uncontrolled pyttsx3 engines running simultaneously...
-Prefer a SINGLE long-lived speech worker/engine... rather than repeatedly
-creating and destroying pyttsx3 QThreads."
-
-Earlier version of this file (still queued correctly, but spun up a brand
-new SpeechSpeaker QThread per utterance) was a real fix for the specific
-crash it targeted -- but "repeatedly create and destroy QThreads" is
-itself a pattern that keeps re-opening the same class of bug on any call
-site that isn't perfectly careful (see core/thread_safety.py's docstring
-for the history of that happening three separate times in this codebase).
-A single persistent worker removes the whole category: there is exactly
-one QThread for TTS, created at startup and stopped at shutdown, and
-"speaking" is just pushing text onto a queue that worker consumes --  no
-QThread is ever created, reassigned, or destroyed mid-speech.
-
-Lifecycle (matches the requested CREATED -> STARTED -> PROCESSING ->
-FINISHED -> STOPPED -> DESTROYED):
-  CREATED   -- SpeechWorker.__init__
-  STARTED   -- SpeechWorker.start() (called once, from SpeechManager.start())
-  PROCESSING-- inside run()'s loop, once per dequeued utterance
-  FINISHED  -- each utterance's engine.runAndWait() returning (loops back
-               to waiting on the queue -- the OS thread itself keeps running)
-  STOPPED   -- run() returns after dequeuing the sentinel from request_stop()
-  DESTROYED -- only after SpeechManager.shutdown() confirms (via
-               core.thread_safety.stop_and_release) that the thread has
-               actually finished
-"""
-
-import logging
-import queue
-
-from PySide6.QtCore import QThread, Signal
+from PySide6.QtCore import QObject
 
 from core.conversation_state import ConversationStateMachine
-from core.thread_safety import log_thread_event, stop_and_release
-
-logger = logging.getLogger("nova.threads")
-
-_STOP = object()  # sentinel, distinguishable from any real string
+from core.voice import SpeechSpeaker
 
 
-class SpeechWorker(QThread):
-    """One instance for the whole app lifetime. Do not create a second one
-    -- SpeechManager owns the only instance and enforces that."""
-
-    speaking_finished = Signal()
-
-    def __init__(self, fsm: ConversationStateMachine | None):
-        super().__init__()
-        self._fsm = fsm
-        self._queue: "queue.Queue[str | object]" = queue.Queue()
-
-    def enqueue(self, text: str) -> None:
-        self._queue.put(text)
-
-    def request_stop(self) -> None:
-        self._queue.put(_STOP)
-
-    def run(self) -> None:
-        log_thread_event("STARTED", self)
-
-        # pyttsx3 on Windows drives SAPI5 through COM, and COM requires
-        # each thread that touches it to initialize its own apartment
-        # first. This is a separate, well-documented native crash source
-        # from the QThread-lifetime issue -- distinct, but easy to mistake
-        # for it, since it also only shows up on a background thread and
-        # presents the same way (something gets spoken, then it dies).
-        # pythoncom only exists on Windows (ships with pywin32); everywhere
-        # else this is a no-op.
-        com_initialized = False
-        try:
-            import pythoncom
-
-            pythoncom.CoInitialize()
-            com_initialized = True
-        except ImportError:
-            pass
-
-        engine = None
-        try:
-            import pyttsx3
-
-            engine = pyttsx3.init()
-        except Exception:
-            logger.exception("[THREAD] SpeechWorker failed to initialize pyttsx3 -- TTS disabled for this session")
-
-        try:
-            while True:
-                item = self._queue.get()  # blocks -- this IS the thread's idle state, not busy-waiting
-                if item is _STOP:
-                    break
-
-                logger.info("[THREAD] SpeechWorker PROCESSING: %r", item[:60])
-                if self._fsm is not None:
-                    self._fsm.on_speaking()
-                try:
-                    if engine is not None:
-                        engine.say(item)
-                        engine.runAndWait()
-                except Exception:
-                    logger.exception("[THREAD] SpeechWorker: engine.runAndWait() raised for %r", item[:60])
-                finally:
-                    if self._fsm is not None:
-                        self._fsm.on_response_complete()
-                    self.speaking_finished.emit()
-        finally:
-            if com_initialized:
-                import pythoncom
-
-                pythoncom.CoUninitialize()
-            log_thread_event("STOPPED", self)
-
-
-class SpeechManager:
+class SpeechManager(QObject):
     """
-    Thin façade ChatPanel/reminder_alert talk to -- `speak(text)` just
-    enqueues onto the one persistent SpeechWorker. No QThread is created
-    or touched here at all; that's entirely SpeechWorker's job now.
+    Originally fixed a real crash: ChatPanel used to hold a single
+    `self._speaker` reference and reassign it on every call to _speak().
+    If a second _speak() happened while the first SpeechSpeaker's QThread
+    was still running pyttsx3's runAndWait(), the reassignment dropped
+    the only Python reference to the still-running thread, and Qt
+    destroyed a running QThread: "QThread: Destroyed while thread is
+    still running", process dead. The queue below (only one SpeechSpeaker
+    ever alive at a time) fixes *that* failure mode.
+
+    THAT FIX WAS INCOMPLETE. The queue guard stops a *second* speak()
+    from overwriting `self._current`, but `_on_finished` -- the only
+    place that ever clears `self._current` -- used to drop the reference
+    as soon as the custom `finished_speaking` signal arrived, not after
+    confirming the OS thread had actually ended. `finished_speaking` is
+    emitted from the *last line inside* SpeechSpeaker.run(), which is
+    strictly before Qt's own thread-finalization runs (the code that
+    actually flips isRunning() to False and lets the OS thread exit).
+    Because that signal is a queued cross-thread connection, delivery to
+    this slot depends entirely on when the main thread's event loop gets
+    around to it -- there is no guarantee it happens after the worker
+    thread has fully unwound, only that it happens after emit() posts
+    the event. Under GIL contention from other threads doing real work
+    at the same time (exactly the situation at startup: SpeakerSyncWorker,
+    VoiceListener, the WebSocket thread, and the first health-check/
+    reminder-poll workers are all alive within milliseconds of each
+    other), the worker thread can be descheduled for the few remaining
+    bytecodes between "signal posted" and "run() actually returns", and
+    the main thread can process the already-queued event before that
+    happens. Reproduced directly: a faithful port of this exact
+    queue-guarded logic, driven by a QTimer under simulated GIL
+    contention from a handful of busy threads, hits "QThread: Destroyed
+    while thread is still running" / exit 134 on every run; switching
+    `_on_finished` to `wait()` before clearing the reference (below)
+    eliminates it across repeated runs of the same harness.
+
+    The fix: `_on_finished` now calls `self._current.wait()` -- a real
+    OS-level join -- before clearing the reference. `wait()` is the only
+    authoritative source for "has the native thread actually finished";
+    a signal emitted from inside run() is not. By the time this slot
+    runs, the thread is at most a few instructions from done, so this
+    essentially never blocks in practice, but it makes the drop provably
+    safe instead of racy.
     """
 
     def __init__(self, fsm: ConversationStateMachine):
+        super().__init__()
         self._fsm = fsm
-        self._worker = SpeechWorker(fsm)
-        self._worker.start()
+        self._queue: list[str] = []
+        self._current: SpeechSpeaker | None = None
 
     def speak(self, text: str) -> None:
         if not text:
+            if self._current is None:
+                self._fsm.on_response_complete()  # nothing queued or speaking -- don't leave the FSM stuck
             return
-        self._worker.enqueue(text)
+        self._queue.append(text)
+        self._maybe_start_next()
 
-    def shutdown(self, timeout_ms: int = 3000) -> None:
-        """Called from app shutdown. Uses the shared safe-stop helper --
-        never a bare wait()-then-proceed-anyway, which is the exact
-        pattern that caused this bug the first three times."""
-        stop_and_release(self._worker, self._worker.request_stop, timeout_ms, lambda: None)
+    def _maybe_start_next(self) -> None:
+        if self._current is not None or not self._queue:
+            return
+        text = self._queue.pop(0)
+        self._current = SpeechSpeaker(text, self._fsm)
+        self._current.finished_speaking.connect(self._on_finished)
+        self._current.start()
+
+    def _on_finished(self) -> None:
+        # See class docstring: `finished_speaking` fires before the OS
+        # thread has necessarily finished unwinding. wait() with no
+        # timeout blocks until it genuinely has -- by this point that's
+        # at most a few instructions away, never a real stall.
+        if self._current is not None:
+            self._current.wait()
+        self._current = None
+        self._maybe_start_next()
+
+    def shutdown(self, timeout_ms: int = 2000) -> None:
+        """Called from app shutdown -- waits for the in-flight speaker
+        rather than letting the app quit out from under it (same failure
+        mode as the bug above, just triggered by process exit instead of
+        a second _speak() call)."""
+        self._queue.clear()
+        if self._current is not None:
+            self._current.wait(timeout_ms)

@@ -5,7 +5,7 @@ from PySide6.QtWidgets import QApplication, QMessageBox
 
 from core.api_client import APIError, NovaAPIClient
 from core.reminder_scheduler import DueReminder
-from core.speech_manager import SpeechManager
+from core.voice_service import VoiceService
 from os_control.base import get_controller
 
 
@@ -35,19 +35,20 @@ class _ReminderActionWorker(QThread):
 _pending_action_workers: list[_ReminderActionWorker] = []
 
 
-def present_reminder(reminder: DueReminder, client: NovaAPIClient, speech: SpeechManager) -> None:
+def present_reminder(reminder: DueReminder, client: NovaAPIClient, voice_service: VoiceService) -> None:
     """
     The actual alarm moment (spec section 35): notification + sound + Nova
     speaking the reminder aloud + a real Snooze/Dismiss dialog — not just a
     silent database status flip. Called on the Qt main thread from
     ReminderScheduler.reminder_due.
 
-    Speech goes through the shared SpeechManager (the same one ChatPanel
-    uses) rather than a standalone SpeechSpeaker of its own. Two independent
-    pyttsx3 engines speaking at the same time — Nova mid-reply to something
-    the user just asked, and a reminder firing at that exact moment — would
-    talk over each other. Routing both through one queue means a reminder
-    that fires mid-conversation waits its turn instead of colliding.
+    Speech goes through the shared VoiceService (the same one the chat
+    panel and the wake-word pipeline use) rather than a standalone
+    SpeechSpeaker of its own. Two independent pyttsx3 engines speaking at
+    the same time — Nova mid-reply to something the user just asked, and
+    a reminder firing at that exact moment — would talk over each other.
+    Routing both through one queue means a reminder that fires mid-
+    conversation waits its turn instead of colliding.
     """
     title = "Nova reminder"
     body = reminder.title + (f" — {reminder.notes}" if reminder.notes else "")
@@ -70,7 +71,7 @@ def present_reminder(reminder: DueReminder, client: NovaAPIClient, speech: Speec
         for i in range(3):
             QTimer.singleShot(i * 400, QApplication.beep)
 
-    speech.speak(f"Reminder: {reminder.title}")
+    voice_service.speak(f"Reminder: {reminder.title}")
     # Intentionally not awaited — TTS speaks in the background (or queues
     # behind whatever Nova's already saying) while the dialog below is
     # already interactive; the user shouldn't have to wait for the

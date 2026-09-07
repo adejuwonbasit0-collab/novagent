@@ -1,4 +1,4 @@
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from app.models.permission import PermissionScope, RiskLevel
 from app.services.connection_manager import CommandTimeout, DeviceNotConnected, connection_manager
@@ -98,6 +98,35 @@ class OpenApplicationTool(BaseTool):
         return await _dispatch_to_device("open_application", {"app_name": params.app_name}, ctx)
 
 
+class OpenUrlInput(BaseModel):
+    url: str = Field(description="Full URL to open, including https://. Use this for a specific website (a given address, or a Google search: https://www.google.com/search?q=...).")
+
+
+class OpenUrlTool(BaseTool):
+    """core/ws_client.py's dispatch table has handled 'open_url' since
+    before this tool existed -- the desktop agent side was always real
+    (os_control's open_url just calls webbrowser.open, on all three
+    platforms). What was missing was this: no backend Tool meant the LLM
+    had no way to ever propose the call, and core/local_router.py
+    explicitly short-circuited any "open <url/website/link>" phrasing with
+    a canned "not wired up yet" -- correct at the time, stale once this
+    tool exists. See local_router.py's own comment for the matching fix
+    there."""
+
+    name = "open_url"
+    description = "Open a specific URL in the user's default browser -- a named website, or a Google search URL for a general web query."
+    input_schema = OpenUrlInput
+    required_permission = PermissionScope.BROWSER_CONTROL
+    risk_level = RiskLevel.LOW
+    requires_confirmation = False
+    supported_platforms = ("windows", "macos", "linux")
+    timeout_seconds = 20.0
+
+    async def _run(self, params: OpenUrlInput, ctx: ToolExecutionContext) -> ToolResponse:
+        return await _dispatch_to_device("open_url", {"url": params.url}, ctx)
+
+
 ToolRegistry.register(ShutdownComputerTool())
 ToolRegistry.register(LockComputerTool())
 ToolRegistry.register(OpenApplicationTool())
+ToolRegistry.register(OpenUrlTool())

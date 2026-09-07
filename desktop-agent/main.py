@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import logging
 import sys
 import threading
 
@@ -12,19 +11,13 @@ from core.api_client import NovaAPIClient
 from core.conversation_state import ConversationState
 from core.device_store import DeviceStore
 from core.reminder_scheduler import ReminderScheduler
-from core.thread_safety import log_thread_event, stop_and_release
+from core.voice_service import VoiceService
 from core.ws_client import DeviceWebSocketClient
 from ui.bubble import AssistantBubble
 from ui.chat_panel import ChatPanel
 from ui.onboarding import OnboardingDialog
 from ui.reminder_alert import present_reminder
 from config import settings
-
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s %(levelname)s %(message)s",
-)
-logger = logging.getLogger("nova.threads")
 
 HEALTH_CHECK_INTERVAL_MS = 15000
 
@@ -43,21 +36,45 @@ class HealthCheckWorker(QThread):
         self._client = client
 
     def run(self) -> None:
-        log_thread_event("STARTED", self)
         ok = asyncio.run(self._client.health_check())
         self.result.emit(ok)
-        log_thread_event("STOPPED", self)
 
 
 class NovaAgentApp:
+    """
+    Spec section 9's architecture, applied: VoiceService (fsm, speaker
+    verification, VoiceListener, SpeechManager) is constructed here and
+    lives for the whole process, independent of any UI window. ChatPanel
+    only ever *observes/drives* VoiceService -- it never owns any of
+    that -- so closing/hiding it can't affect the pipeline (see
+    ChatPanel.closeEvent).
+
+    ChatPanel is still constructed eagerly here, just never shown until
+    the bubble is clicked -- it has to exist for its
+    voice_service.transcript connection to be live, since that's what
+    actually turns a recognized utterance into a tool call or a chat
+    request (route_locally / ChatWorker / DirectToolWorker all live on
+    ChatPanel). A version of this that created ChatPanel lazily on first
+    bubble click would leave every voice command going nowhere until the
+    user opened the window at least once -- worse than the "chat panel
+    owns critical services" problem this refactor set out to fix.
+    """
+
     def __init__(self):
         self.app = QApplication(sys.argv)
         self.app.setQuitOnLastWindowClosed(False)  # closing the chat panel shouldn't kill the tray bubble
-        self.app.aboutToQuit.connect(self._shutdown_threads)
+        self.app.aboutToQuit.connect(self._shutdown)
 
         self.client = NovaAPIClient()
+        self.voice_service = VoiceService(self.client)
+        self.voice_service.fsm.state_changed.connect(self._on_fsm_state_changed)
+
         self.bubble = AssistantBubble()
-        self.chat_panel: ChatPanel | None = None
+        # Created now, shown later (see class docstring) -- this is what
+        # actually turns a voice transcript into a tool call/chat
+        # request, so it must be alive for the whole process, not just
+        # while the window happens to be visible.
+        self.chat_panel = ChatPanel(self.client, self.voice_service)
 
         self.ws_client = DeviceWebSocketClient()
         self._ws_thread: threading.Thread | None = None
@@ -70,57 +87,48 @@ class NovaAgentApp:
         self.reminder_scheduler.reminder_due.connect(self._on_reminder_due)
 
         self.bubble.clicked.connect(self._toggle_chat_panel)
+        self.bubble.pause_requested.connect(self.voice_service.fsm.pause)
+        self.bubble.resume_requested.connect(self.voice_service.fsm.start)
+        self.bubble.stop_requested.connect(self.voice_service.fsm.stop)
         self.bubble.move(100, 100)
 
-    def _shutdown_threads(self) -> None:
-        # Explicit, ordered shutdown (per the requested shutdown sequence):
-        # stop the things that generate new work first (voice, reminders,
-        # websocket), then wait for whatever's already in flight to
-        # actually finish, and only then let QApplication exit. Every
-        # QThread stop goes through stop_and_release so none of them can
-        # be dropped while still running -- see core/thread_safety.py.
-        if self.chat_panel is not None:
-            self.chat_panel.stop_listening()
-            listener = self.chat_panel._voice_listener
-            if listener is not None:
-                stop_and_release(listener, listener.stop, 6000, lambda: setattr(self.chat_panel, "_voice_listener", None))
-            if self.chat_panel._sync_worker.isRunning():
-                self.chat_panel._sync_worker.wait(3000)
-            self.chat_panel._speech.shutdown()
+    def _on_fsm_state_changed(self, state: ConversationState) -> None:
+        self.bubble.set_state(state)
+
+    def _shutdown(self) -> None:
+        """Spec section 18's shutdown order. Every step below either has
+        a real wait()/timeout or delegates to something that does
+        (VoiceService.shutdown mirrors this same rule internally) --
+        nothing here drops a QThread reference without confirming it
+        actually finished first."""
+        self.voice_service.shutdown()  # stop wake listener -> stop TTS -> wait
         if self._health_worker is not None and self._health_worker.isRunning():
-            self._health_worker.wait(3000)
-        self.reminder_scheduler.stop()
-        self.ws_client.stop()
-        logger.info("[THREAD] Shutdown sequence complete")
+            self._health_worker.wait(3000)  # stop network workers
+        self.reminder_scheduler.stop()  # stop reminder service
+        self.ws_client.stop()  # stop websocket
 
     def _toggle_chat_panel(self) -> None:
-        if self.chat_panel is None:
-            self.chat_panel = ChatPanel(self.client)
-            self.chat_panel.fsm.state_changed.connect(self.bubble.set_state)
-            self._wire_bubble_controls()
-
         if self.chat_panel.isVisible():
             self.chat_panel.hide()
         else:
             self.chat_panel.show()
+            # raise_()/activateWindow() -- not just show() -- so the panel
+            # actually comes to the front instead of appearing behind
+            # whatever else has focus (a real report against the old
+            # code: the window could open "behind" other applications
+            # with no obvious way to bring it forward).
             self.chat_panel.raise_()
+            self.chat_panel.activateWindow()
             self.chat_panel.input.setFocus()
-
-    def _wire_bubble_controls(self) -> None:
-        """Spec section 37: the bubble's own Pause/Resume/Stop menu
-        controls the same ConversationStateMachine everything else reacts
-        to -- VoiceListener already checks fsm.is_paused/is_stopped every
-        loop iteration, so these take effect within one recording cycle
-        without needing to reach into the listener thread directly."""
-        self.bubble.pause_requested.connect(self.chat_panel.fsm.pause)
-        self.bubble.resume_requested.connect(self.chat_panel.fsm.start)
-        self.bubble.stop_requested.connect(self.chat_panel.fsm.stop)
 
     def _run_onboarding_if_needed(self) -> bool:
         if DeviceStore.is_registered():
             return True
 
         dialog = OnboardingDialog(self.client)
+        dialog.show()
+        dialog.raise_()
+        dialog.activateWindow()
         return dialog.exec() == dialog.DialogCode.Accepted
 
     def _start_ws_client(self) -> None:
@@ -145,19 +153,12 @@ class NovaAgentApp:
         self._health_worker.start()
 
     def _on_health_result(self, reachable: bool) -> None:
-        if self.chat_panel is not None:
-            self.chat_panel.fsm.set_offline(not reachable)
-        else:
-            self.bubble.set_state(ConversationState.OFFLINE if not reachable else ConversationState.IDLE)
+        # fsm lives on VoiceService now, independent of whether the chat
+        # panel has ever been opened -- no None-check needed.
+        self.voice_service.fsm.set_offline(not reachable)
 
     def _on_reminder_due(self, reminder) -> None:
-        # self.chat_panel always exists by the time reminders can fire —
-        # run() creates it (and starts listening) before starting the
-        # scheduler below — but guard anyway since this is reachable from
-        # a QTimer callback outside the normal call stack.
-        if self.chat_panel is None:
-            return
-        present_reminder(reminder, self.client, self.chat_panel._speech)
+        present_reminder(reminder, self.client, self.voice_service)
 
     def run(self) -> int:
         if not self._run_onboarding_if_needed():
@@ -168,45 +169,21 @@ class NovaAgentApp:
         except Exception:
             pass
 
-        self.bubble.set_state(ConversationState.IDLE)
-        self.bubble.show()
-
-        # Deferred to fire on the FIRST iteration of the Qt event loop, not
-        # before app.exec() below has even started it. ChatPanel's own
-        # constructor starts a QThread (SpeakerSyncWorker), and
-        # start_listening() below starts another (VoiceListener) plus
-        # queues onto a third (the persistent SpeechWorker inside
-        # SpeechManager, itself also created in ChatPanel.__init__) --
-        # every one of them communicates back to the GUI thread via queued
-        # signals, and a queued signal only gets delivered once the
-        # receiving thread's event loop is actually pumping. Constructing
-        # ChatPanel (and therefore starting these threads) before exec()
-        # begins doesn't crash by itself, but it means their very first
-        # signals queue up with no guarantee of *when* the loop first gets
-        # around to them, relative to whatever else this call stack is
-        # still doing. Deferring the whole thing removes that ambiguity.
-        QTimer.singleShot(0, self._start_background_services)
-
-        return self.app.exec()
-
-    def _start_background_services(self) -> None:
-        # Guarded: on the vanishingly small chance the user clicks the
-        # bubble before this deferred call fires, _toggle_chat_panel will
-        # already have created self.chat_panel. Recreating it here would
-        # replace that reference while ITS OWN background threads (the
-        # SpeakerSyncWorker + persistent SpeechWorker started inside
-        # ChatPanel.__init__) could still be running -- the exact bug
-        # class this whole file is about avoiding.
-        if self.chat_panel is None:
-            self.chat_panel = ChatPanel(self.client)
-            self.chat_panel.fsm.state_changed.connect(self.bubble.set_state)
-            self._wire_bubble_controls()
-        self.chat_panel.start_listening()
+        # Controlled startup sequence (spec section 4): sync the speaker
+        # profile, THEN arm the microphone/wake-word pipeline, THEN (once
+        # VoiceListener confirms it's actually listening) speak the
+        # greeting -- see VoiceService.start(). No chat window is
+        # required for any of this.
+        self.voice_service.start()
 
         self._start_ws_client()
         self._health_timer.start()
         self._run_health_check()  # don't wait a full interval for the first reading
         self.reminder_scheduler.start()
+
+        self.bubble.set_state(ConversationState.IDLE)
+        self.bubble.show()
+        return self.app.exec()
 
 
 if __name__ == "__main__":

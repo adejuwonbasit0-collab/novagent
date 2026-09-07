@@ -9,9 +9,18 @@ from os_control.base import OSActionResult, OSController
 
 
 class LinuxController(OSController):
+    # See os_control/windows.py's top-of-file comment. Real focus
+    # verification on Linux would need xdotool (or a similar tool) and
+    # varies by desktop environment/X11 vs Wayland -- not a current
+    # dependency. Same honestly-weaker fixed-delay mitigation as macOS.
+    _APP_LAUNCH_SETTLE_S = 0.8
+
     def open_application(self, app_name: str) -> OSActionResult:
         try:
             subprocess.Popen([app_name])
+            import time
+
+            time.sleep(self._APP_LAUNCH_SETTLE_S)
             return OSActionResult(success=True, message=f"Opened {app_name}")
         except Exception as e:
             return OSActionResult(success=False, message="", error=str(e))
@@ -66,6 +75,22 @@ class LinuxController(OSController):
         try:
             os.makedirs(os.path.expanduser(path), exist_ok=True)
             return OSActionResult(success=True, message=f"Created folder {path}")
+        except Exception as e:
+            return OSActionResult(success=False, message="", error=str(e))
+
+    def create_file(self, path: str, content: str = "") -> OSActionResult:
+        try:
+            full_path = os.path.expanduser(path)
+            if os.path.exists(full_path):
+                return OSActionResult(
+                    success=False, message="", error=f"A file already exists at {path} -- not overwriting it."
+                )
+            parent = os.path.dirname(full_path)
+            if parent:
+                os.makedirs(parent, exist_ok=True)
+            with open(full_path, "w", encoding="utf-8") as f:
+                f.write(content)
+            return OSActionResult(success=True, message=f"Created {path}")
         except Exception as e:
             return OSActionResult(success=False, message="", error=str(e))
 

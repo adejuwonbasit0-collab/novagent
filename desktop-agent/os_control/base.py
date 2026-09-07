@@ -44,6 +44,9 @@ class OSController(ABC):
     def create_folder(self, path: str) -> OSActionResult: ...
 
     @abstractmethod
+    def create_file(self, path: str, content: str = "") -> OSActionResult: ...
+
+    @abstractmethod
     def type_text(self, text: str) -> OSActionResult: ...
 
     @abstractmethod

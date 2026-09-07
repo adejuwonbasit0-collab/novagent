@@ -35,6 +35,23 @@ class CreateFolderTool(BaseTool):
         return await dispatch(self.name, params.model_dump(), ctx)
 
 
+class CreateFileInput(BaseModel):
+    path: str = Field(description="Full path for the file to create")
+    content: str = Field(default="", max_length=50000, description="Text content to write into the new file, if any")
+
+
+class CreateFileTool(BaseTool):
+    name = "create_file"
+    description = "Create a new file (optionally with text content) on the connected computer. Fails if a file already exists at that path -- use a different name rather than overwriting."
+    input_schema = CreateFileInput
+    required_permission = PermissionScope.FILES_WRITE
+    risk_level = RiskLevel.MEDIUM
+    supported_platforms = ("windows", "macos", "linux")
+
+    async def _run(self, params: CreateFileInput, ctx: ToolExecutionContext) -> ToolResponse:
+        return await dispatch(self.name, params.model_dump(), ctx)
+
+
 class TypeTextInput(BaseModel):
     text: str = Field(max_length=10000, description="Text to type into the currently focused application")
 
@@ -69,5 +86,6 @@ class OpenFolderInApplicationTool(BaseTool):
 
 
 ToolRegistry.register(CreateFolderTool())
+ToolRegistry.register(CreateFileTool())
 ToolRegistry.register(TypeTextTool())
 ToolRegistry.register(OpenFolderInApplicationTool())

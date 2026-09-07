@@ -17,9 +17,25 @@ def _applescript_string(value: str) -> str:
 
 
 class MacOSController(OSController):
+    # See os_control/windows.py's top-of-file comment for the underlying
+    # bug this addresses: type_text fires into whatever currently has
+    # focus, with no idea what "the app just opened" is, so a command
+    # sequence like open_application -> type_text can race a slow-starting
+    # app. Windows gets a real signal (poll the foreground window handle
+    # until it changes); doing the same properly on macOS means polling
+    # NSWorkspace.frontmostApplication via pyobjc, which isn't a current
+    # dependency of this project. A fixed settle delay is a strictly
+    # weaker mitigation -- it doesn't confirm anything actually changed --
+    # but it's honest about that limitation rather than pretending to
+    # verify what it can't. Real fix: add pyobjc and poll frontmost app.
+    _APP_LAUNCH_SETTLE_S = 0.8
+
     def open_application(self, app_name: str) -> OSActionResult:
         try:
             subprocess.run(["open", "-a", app_name], check=True)
+            import time
+
+            time.sleep(self._APP_LAUNCH_SETTLE_S)
             return OSActionResult(success=True, message=f"Opened {app_name}")
         except Exception as e:
             return OSActionResult(success=False, message="", error=str(e))
@@ -74,6 +90,22 @@ class MacOSController(OSController):
         try:
             os.makedirs(os.path.expanduser(path), exist_ok=True)
             return OSActionResult(success=True, message=f"Created folder {path}")
+        except Exception as e:
+            return OSActionResult(success=False, message="", error=str(e))
+
+    def create_file(self, path: str, content: str = "") -> OSActionResult:
+        try:
+            full_path = os.path.expanduser(path)
+            if os.path.exists(full_path):
+                return OSActionResult(
+                    success=False, message="", error=f"A file already exists at {path} -- not overwriting it."
+                )
+            parent = os.path.dirname(full_path)
+            if parent:
+                os.makedirs(parent, exist_ok=True)
+            with open(full_path, "w", encoding="utf-8") as f:
+                f.write(content)
+            return OSActionResult(success=True, message=f"Created {path}")
         except Exception as e:
             return OSActionResult(success=False, message="", error=str(e))
 
