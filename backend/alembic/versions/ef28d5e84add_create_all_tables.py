@@ -29,8 +29,8 @@ def upgrade() -> None:
     sa.Column('is_email_verified', sa.Boolean(), nullable=False),
     sa.Column('assistant_name', sa.String(length=100), nullable=False),
     sa.Column('id', sa.UUID(), nullable=False),
-    sa.Column('created_at', sa.DateTime(timezone=True), server_default=sa.text('now()'), nullable=False),
-    sa.Column('updated_at', sa.DateTime(timezone=True), server_default=sa.text('now()'), nullable=False),
+    sa.Column('created_at', sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False),
+    sa.Column('updated_at', sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False),
     sa.PrimaryKeyConstraint('id')
     )
     op.create_index(op.f('ix_users_email'), 'users', ['email'], unique=True)
@@ -43,8 +43,8 @@ def upgrade() -> None:
     sa.Column('last_seen_at', sa.DateTime(timezone=True), nullable=True),
     sa.Column('token_hash', sa.String(length=255), nullable=False),
     sa.Column('id', sa.UUID(), nullable=False),
-    sa.Column('created_at', sa.DateTime(timezone=True), server_default=sa.text('now()'), nullable=False),
-    sa.Column('updated_at', sa.DateTime(timezone=True), server_default=sa.text('now()'), nullable=False),
+    sa.Column('created_at', sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False),
+    sa.Column('updated_at', sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False),
     sa.ForeignKeyConstraint(['user_id'], ['users.id'], ),
     sa.PrimaryKeyConstraint('id')
     )
@@ -62,8 +62,8 @@ def upgrade() -> None:
     sa.Column('notify_desktop', sa.Boolean(), nullable=False),
     sa.Column('notify_sound', sa.Boolean(), nullable=False),
     sa.Column('id', sa.UUID(), nullable=False),
-    sa.Column('created_at', sa.DateTime(timezone=True), server_default=sa.text('now()'), nullable=False),
-    sa.Column('updated_at', sa.DateTime(timezone=True), server_default=sa.text('now()'), nullable=False),
+    sa.Column('created_at', sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False),
+    sa.Column('updated_at', sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False),
     sa.ForeignKeyConstraint(['user_id'], ['users.id'], ),
     sa.PrimaryKeyConstraint('id')
     )
@@ -75,8 +75,8 @@ def upgrade() -> None:
     sa.Column('scope', sa.Enum('FILES_READ', 'FILES_WRITE', 'APP_OPEN', 'APP_CLOSE', 'BROWSER_READ', 'BROWSER_CONTROL', 'EMAIL_SEND', 'CALENDAR_READ', 'CALENDAR_WRITE', 'CONTACTS_READ', 'CALL_INITIATE', 'SYSTEM_LOCK', 'SYSTEM_SHUTDOWN', 'SCREEN_READ', 'AUTOMATION_EXECUTE', 'REMINDERS_MANAGE', name='permission_scope'), nullable=False),
     sa.Column('granted', sa.Boolean(), nullable=False),
     sa.Column('id', sa.UUID(), nullable=False),
-    sa.Column('created_at', sa.DateTime(timezone=True), server_default=sa.text('now()'), nullable=False),
-    sa.Column('updated_at', sa.DateTime(timezone=True), server_default=sa.text('now()'), nullable=False),
+    sa.Column('created_at', sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False),
+    sa.Column('updated_at', sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False),
     sa.ForeignKeyConstraint(['user_id'], ['users.id'], ),
     sa.PrimaryKeyConstraint('id'),
     sa.UniqueConstraint('user_id', 'scope', name='uq_user_permission_scope')
@@ -94,8 +94,8 @@ def upgrade() -> None:
     sa.Column('custom_style', sa.Float(), nullable=False),
     sa.Column('consent_given', sa.Boolean(), nullable=False),
     sa.Column('id', sa.UUID(), nullable=False),
-    sa.Column('created_at', sa.DateTime(timezone=True), server_default=sa.text('now()'), nullable=False),
-    sa.Column('updated_at', sa.DateTime(timezone=True), server_default=sa.text('now()'), nullable=False),
+    sa.Column('created_at', sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False),
+    sa.Column('updated_at', sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False),
     sa.ForeignKeyConstraint(['user_id'], ['users.id'], ),
     sa.PrimaryKeyConstraint('id')
     )
@@ -108,8 +108,8 @@ def upgrade() -> None:
     sa.Column('size_bytes', sa.Integer(), nullable=False),
     sa.Column('status', sa.Enum('UPLOADED', 'USED', name='voice_sample_status'), nullable=False),
     sa.Column('id', sa.UUID(), nullable=False),
-    sa.Column('created_at', sa.DateTime(timezone=True), server_default=sa.text('now()'), nullable=False),
-    sa.Column('updated_at', sa.DateTime(timezone=True), server_default=sa.text('now()'), nullable=False),
+    sa.Column('created_at', sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False),
+    sa.Column('updated_at', sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False),
     sa.ForeignKeyConstraint(['user_id'], ['users.id'], ),
     sa.PrimaryKeyConstraint('id')
     )
@@ -121,7 +121,7 @@ def upgrade() -> None:
     sa.Column('resource', sa.String(length=255), nullable=True),
     sa.Column('result', sa.String(length=20), nullable=False),
     sa.Column('metadata_json', sa.JSON(), nullable=True),
-    sa.Column('created_at', sa.DateTime(timezone=True), server_default=sa.text('now()'), nullable=False),
+    sa.Column('created_at', sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False),
     sa.Column('id', sa.UUID(), nullable=False),
     sa.ForeignKeyConstraint(['device_id'], ['devices.id'], ),
     sa.ForeignKeyConstraint(['user_id'], ['users.id'], ),
@@ -138,8 +138,8 @@ def upgrade() -> None:
     sa.Column('expires_at', sa.DateTime(timezone=True), nullable=False),
     sa.Column('resolved', sa.Boolean(), nullable=False),
     sa.Column('id', sa.UUID(), nullable=False),
-    sa.Column('created_at', sa.DateTime(timezone=True), server_default=sa.text('now()'), nullable=False),
-    sa.Column('updated_at', sa.DateTime(timezone=True), server_default=sa.text('now()'), nullable=False),
+    sa.Column('created_at', sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False),
+    sa.Column('updated_at', sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False),
     sa.ForeignKeyConstraint(['device_id'], ['devices.id'], ),
     sa.ForeignKeyConstraint(['user_id'], ['users.id'], ),
     sa.PrimaryKeyConstraint('id')

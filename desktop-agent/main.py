@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import sys
 import threading
 
@@ -11,12 +12,19 @@ from core.api_client import NovaAPIClient
 from core.conversation_state import ConversationState
 from core.device_store import DeviceStore
 from core.reminder_scheduler import ReminderScheduler
+from core.thread_safety import log_thread_event, stop_and_release
 from core.ws_client import DeviceWebSocketClient
 from ui.bubble import AssistantBubble
 from ui.chat_panel import ChatPanel
 from ui.onboarding import OnboardingDialog
 from ui.reminder_alert import present_reminder
 from config import settings
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)s %(message)s",
+)
+logger = logging.getLogger("nova.threads")
 
 HEALTH_CHECK_INTERVAL_MS = 15000
 
@@ -35,8 +43,10 @@ class HealthCheckWorker(QThread):
         self._client = client
 
     def run(self) -> None:
+        log_thread_event("STARTED", self)
         ok = asyncio.run(self._client.health_check())
         self.result.emit(ok)
+        log_thread_event("STOPPED", self)
 
 
 class NovaAgentApp:
@@ -63,15 +73,17 @@ class NovaAgentApp:
         self.bubble.move(100, 100)
 
     def _shutdown_threads(self) -> None:
+        # Explicit, ordered shutdown (per the requested shutdown sequence):
+        # stop the things that generate new work first (voice, reminders,
+        # websocket), then wait for whatever's already in flight to
+        # actually finish, and only then let QApplication exit. Every
+        # QThread stop goes through stop_and_release so none of them can
+        # be dropped while still running -- see core/thread_safety.py.
         if self.chat_panel is not None:
             self.chat_panel.stop_listening()
-            if self.chat_panel._voice_listener is not None:
-                # Same reasoning as chat_panel.py's _toggle_voice: sd.rec()
-                # can block up to 5s, so this needs real margin, not the
-                # 2000ms this used to use — a timeout here previously just
-                # let the app quit anyway, which destroys the QThread
-                # object while the OS thread could still be running.
-                self.chat_panel._voice_listener.wait(6000)
+            listener = self.chat_panel._voice_listener
+            if listener is not None:
+                stop_and_release(listener, listener.stop, 6000, lambda: setattr(self.chat_panel, "_voice_listener", None))
             if self.chat_panel._sync_worker.isRunning():
                 self.chat_panel._sync_worker.wait(3000)
             self.chat_panel._speech.shutdown()
@@ -79,6 +91,7 @@ class NovaAgentApp:
             self._health_worker.wait(3000)
         self.reminder_scheduler.stop()
         self.ws_client.stop()
+        logger.info("[THREAD] Shutdown sequence complete")
 
     def _toggle_chat_panel(self) -> None:
         if self.chat_panel is None:
@@ -155,21 +168,45 @@ class NovaAgentApp:
         except Exception:
             pass
 
-        # Keep the listener alive with the agent, not with the optional chat
-        # window. The user can still stop it from the panel when needed.
-        self.chat_panel = ChatPanel(self.client)
-        self.chat_panel.fsm.state_changed.connect(self.bubble.set_state)
-        self._wire_bubble_controls()
+        self.bubble.set_state(ConversationState.IDLE)
+        self.bubble.show()
+
+        # Deferred to fire on the FIRST iteration of the Qt event loop, not
+        # before app.exec() below has even started it. ChatPanel's own
+        # constructor starts a QThread (SpeakerSyncWorker), and
+        # start_listening() below starts another (VoiceListener) plus
+        # queues onto a third (the persistent SpeechWorker inside
+        # SpeechManager, itself also created in ChatPanel.__init__) --
+        # every one of them communicates back to the GUI thread via queued
+        # signals, and a queued signal only gets delivered once the
+        # receiving thread's event loop is actually pumping. Constructing
+        # ChatPanel (and therefore starting these threads) before exec()
+        # begins doesn't crash by itself, but it means their very first
+        # signals queue up with no guarantee of *when* the loop first gets
+        # around to them, relative to whatever else this call stack is
+        # still doing. Deferring the whole thing removes that ambiguity.
+        QTimer.singleShot(0, self._start_background_services)
+
+        return self.app.exec()
+
+    def _start_background_services(self) -> None:
+        # Guarded: on the vanishingly small chance the user clicks the
+        # bubble before this deferred call fires, _toggle_chat_panel will
+        # already have created self.chat_panel. Recreating it here would
+        # replace that reference while ITS OWN background threads (the
+        # SpeakerSyncWorker + persistent SpeechWorker started inside
+        # ChatPanel.__init__) could still be running -- the exact bug
+        # class this whole file is about avoiding.
+        if self.chat_panel is None:
+            self.chat_panel = ChatPanel(self.client)
+            self.chat_panel.fsm.state_changed.connect(self.bubble.set_state)
+            self._wire_bubble_controls()
         self.chat_panel.start_listening()
 
         self._start_ws_client()
         self._health_timer.start()
         self._run_health_check()  # don't wait a full interval for the first reading
         self.reminder_scheduler.start()
-
-        self.bubble.set_state(ConversationState.IDLE)
-        self.bubble.show()
-        return self.app.exec()
 
 
 if __name__ == "__main__":

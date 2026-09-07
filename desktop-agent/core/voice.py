@@ -1,16 +1,28 @@
 from __future__ import annotations
 
-from PySide6.QtCore import QThread, Signal
+import logging
 import time
+
+from PySide6.QtCore import QThread, Signal
 
 from core.conversation_state import ConversationStateMachine
 from core.speaker_verification import SpeakerVerifier
+from core.thread_safety import log_thread_event
+
+logger = logging.getLogger("nova.threads")
 
 
 class VoiceListener(QThread):
     transcript = Signal(str)
     status = Signal(str)
     failed = Signal(str)
+    # Emitted once, right before entering the listen loop, after imports
+    # and the recognizer have been constructed successfully -- this is
+    # what main.py waits for before announcing "I'm listening for Nova"
+    # instead of speaking that immediately at start_listening() and hoping
+    # initialization happens to succeed a moment later (spec: never speak
+    # before the audio system is confirmed ready).
+    ready = Signal()
 
     def __init__(
         self,
@@ -36,6 +48,7 @@ class VoiceListener(QThread):
             pass
 
     def run(self) -> None:
+        log_thread_event("STARTED", self)
         try:
             import numpy as np
             import sounddevice as sd
@@ -45,6 +58,8 @@ class VoiceListener(QThread):
             recognizer.pause_threshold = 0.8
             recognizer.non_speaking_duration = 0.3
             self.status.emit(f"Listening for {self._wake_name.title()}")
+            self.ready.emit()
+
             while self._running:
                 # Paused/stopped (spec section 37, controlled from the
                 # bubble): release the mic rather than recording into a
@@ -110,49 +125,7 @@ class VoiceListener(QThread):
                     self.transcript.emit(words)
         except Exception as exc:
             self._fsm.on_error()
+            logger.exception("[THREAD] VoiceListener.run() raised")
             self.failed.emit(str(exc))
-
-
-class SpeechSpeaker(QThread):
-    finished_speaking = Signal()
-
-    def __init__(self, text: str, fsm: ConversationStateMachine | None = None):
-        super().__init__()
-        self._text = text
-        self._fsm = fsm
-
-    def run(self) -> None:
-        # pyttsx3 on Windows drives SAPI5 through COM, and COM requires
-        # each thread that touches it to initialize its own apartment
-        # first. pyttsx3.init() from a QThread with no CoInitialize() call
-        # is a separate, well-documented native crash source on Windows —
-        # distinct from (but easy to mistake for) the QThread-lifetime bug
-        # SpeechManager fixes, since it also only shows up when TTS runs
-        # on a background thread and can present the same way (something
-        # gets spoken, then the process dies). pythoncom only exists on
-        # Windows (it ships with pywin32); everywhere else this is a no-op.
-        com_initialized = False
-        try:
-            import pythoncom
-
-            pythoncom.CoInitialize()
-            com_initialized = True
-        except ImportError:
-            pass  # not on Windows, or pywin32 isn't installed — nothing to do
-
-        try:
-            if self._fsm is not None:
-                self._fsm.on_speaking()
-            import pyttsx3
-
-            engine = pyttsx3.init()
-            engine.say(self._text)
-            engine.runAndWait()
         finally:
-            if com_initialized:
-                import pythoncom
-
-                pythoncom.CoUninitialize()
-            if self._fsm is not None:
-                self._fsm.on_response_complete()
-            self.finished_speaking.emit()
+            log_thread_event("STOPPED", self)

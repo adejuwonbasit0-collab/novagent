@@ -17,11 +17,20 @@ def upgrade() -> None:
         "platform_settings",
         sa.Column("assistant_name", sa.String(length=100), nullable=False),
         sa.Column("id", sa.UUID(), nullable=False),
-        sa.Column("created_at", sa.DateTime(timezone=True), server_default=sa.text("now()"), nullable=False),
-        sa.Column("updated_at", sa.DateTime(timezone=True), server_default=sa.text("now()"), nullable=False),
+        sa.Column("created_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False),
+        sa.Column("updated_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False),
         sa.PrimaryKeyConstraint("id"),
     )
-    op.execute("INSERT INTO platform_settings (id, assistant_name) VALUES (gen_random_uuid(), 'Nova')")
+    # Generated in Python and parametrized rather than calling
+    # gen_random_uuid() in raw SQL -- that function is Postgres-only
+    # (pgcrypto), and this migration otherwise runs cleanly on SQLite too
+    # (sa.UUID() is the generic 2.0 type, not the postgres-specific one).
+    import uuid
+
+    platform_settings = sa.table(
+        "platform_settings", sa.column("id", sa.UUID()), sa.column("assistant_name", sa.String())
+    )
+    op.execute(platform_settings.insert().values(id=uuid.uuid4(), assistant_name="Nova"))
 
 
 def downgrade() -> None:

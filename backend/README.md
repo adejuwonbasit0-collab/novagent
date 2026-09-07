@@ -47,22 +47,53 @@ alembic/      migrations (async-aware env.py)
 
 ## Local setup
 
+Two ways to run this locally — same code path either way, since every
+model uses SQLAlchemy 2.0's generic `UUID` type rather than Postgres's
+dialect-specific one, and every migration uses portable `func.now()`
+instead of raw `now()`/`gen_random_uuid()` SQL. Verified directly: a full
+`alembic upgrade head` plus a real register → login → speaker-enroll →
+speaker-verify round trip against SQLite, not just against Postgres.
+
+**Quickest — SQLite, no Docker, no Postgres install:**
+```bash
+python -m venv .venv && source .venv/bin/activate
+pip install -r requirements.txt
+
+echo 'DATABASE_URL=sqlite+aiosqlite:///./nova_dev.db' > .env
+echo 'JWT_SECRET_KEY=change_this_to_a_long_random_value' >> .env
+
+alembic upgrade head
+uvicorn app.main:app --reload
+```
+
+**Production-shaped — Postgres + Redis via Docker:**
 ```bash
 cp .env.example .env          # edit JWT_SECRET_KEY at minimum
 docker compose up -d          # postgres + redis
 python -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
 
-alembic revision --autogenerate -m "init schema"
 alembic upgrade head
-
 uvicorn app.main:app --reload
 ```
+
+Either way, missing `DATABASE_URL`/`JWT_SECRET_KEY` fails immediately at
+import time with a pydantic validation error naming the missing field —
+that's `.env` not being present/loaded, not a code bug; `cp .env.example
+.env` (or the SQLite two-liner above) first.
 
 API docs: `http://localhost:8000/docs`
 
 ## What's implemented now
 
+- **SQLite-or-Postgres portability** — every model uses SQLAlchemy 2.0's
+  generic `UUID` type (not `dialects.postgresql.UUID`), and every
+  migration uses `func.now()`/Python-generated UUIDs instead of raw
+  Postgres-only SQL (`now()`, `gen_random_uuid()`). Verified directly: a
+  full `alembic upgrade head` against a fresh SQLite file (all 12 tables,
+  correct seed data), then a real running server against that same file
+  — register → login → speaker-enroll → speaker-verify-profile → reset,
+  all real HTTP round trips, not just migration success.
 - Register/login/refresh (`/api/v1/auth/*`), JWT access+refresh tokens
 - Current-user dependency with account-status enforcement
 - Device registration/list/rename/revoke (`/api/v1/devices/*`) — issues a
@@ -159,13 +190,25 @@ one at console.anthropic.com. Everything else works without it.
   in `ELEVENLABS_API_KEY`, set `VOICE_PROVIDER=elevenlabs`, and test
   `app/services/voice_providers/elevenlabs.py` for real before relying on
   it.
-- Speech-to-text / real-time voice *input* (typed text still goes into
-  `/assistant/chat`; there's no mic-to-text path yet)
+- Speech-to-text / real-time voice *input* — built in `desktop-agent/core/voice.py`
+  (mic → Google's cloud STT → wake-phrase match → speaker verification →
+  `/assistant/chat`), not in this backend directly; typed text still goes
+  straight into `/assistant/chat` as before, which is what this backend
+  itself provides.
 - Speaker *verification* (voice biometrics for authenticating who's
-  speaking, spec section 12) — distinct from voice *training* (having the
-  assistant speak back in your voice, which is what's built here) and a
-  substantially larger undertaking (embedding models, false-accept/
-  false-reject thresholds, liveness detection) not attempted this round
+  speaking, spec section 8/9) — built: `app/models/speaker_profile.py` +
+  `app/api/v1/speaker.py` on this side, `desktop-agent/core/
+  speaker_embedding.py` + `speaker_verification.py` for the actual
+  on-device matching. Deliberately separate from voice *training*
+  (`app/models/voice.py`, having the assistant speak back in your voice)
+  — those are unrelated features that happen to share the word "voice."
+  Honest caveat: it's a lightweight MFCC-statistics embedding, not a deep
+  neural one (ECAPA-TDNN/resemblyzer-class) — real discrimination
+  (verified: same-speaker cosine similarity ~0.999 vs different-speaker
+  ~0.86-0.90 on synthetic test signals), no liveness/anti-spoofing yet,
+  and the 0.90 default threshold needs recalibrating against real voices
+  rather than trusted as-is — see the SECURITY NOTE at the top of
+  `app/api/v1/speaker.py`.
 - Knowledge/RAG system, agent builder, automation builder
 - Billing/subscriptions, CMS (user/device/audit admin tooling is now
   implemented — see above)

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import logging
+
 from PySide6.QtCore import Qt, QThread, QTimer, Signal
 from PySide6.QtWidgets import (
     QLineEdit,
@@ -16,8 +18,11 @@ from core.voice import VoiceListener
 from core.speaker_verification import SpeakerVerifier
 from core.speech_manager import SpeechManager
 from core.local_router import route_locally
+from core.thread_safety import log_thread_event, stop_and_release
 from ui.voice_enrollment import VoiceEnrollmentDialog
 from config import settings
+
+logger = logging.getLogger("nova.threads")
 
 
 class SpeakerSyncWorker(QThread):
@@ -34,6 +39,7 @@ class SpeakerSyncWorker(QThread):
         self._client = client
 
     def run(self) -> None:
+        log_thread_event("STARTED", self)
         import asyncio
 
         try:
@@ -41,6 +47,7 @@ class SpeakerSyncWorker(QThread):
         except Exception:
             pass  # offline at startup -- fall back to whatever's already cached locally
         finally:
+            log_thread_event("STOPPED", self)
             self.finished_sync.emit()
 
 
@@ -58,6 +65,7 @@ class ChatWorker(QThread):
         self._message = message
 
     def run(self) -> None:
+        log_thread_event("STARTED", self)
         import asyncio
 
         try:
@@ -65,6 +73,8 @@ class ChatWorker(QThread):
             self.finished_ok.emit(reply)
         except Exception as e:
             self.failed.emit(str(e))
+        finally:
+            log_thread_event("STOPPED", self)
 
 
 class ConfirmWorker(QThread):
@@ -77,6 +87,7 @@ class ConfirmWorker(QThread):
         self._pending_id = pending_id
 
     def run(self) -> None:
+        log_thread_event("STARTED", self)
         import asyncio
 
         try:
@@ -84,6 +95,8 @@ class ConfirmWorker(QThread):
             self.finished_ok.emit(result)
         except Exception as e:
             self.failed.emit(str(e))
+        finally:
+            log_thread_event("STOPPED", self)
 
 
 class DirectToolWorker(QThread):
@@ -97,6 +110,7 @@ class DirectToolWorker(QThread):
         self._params = params
 
     def run(self) -> None:
+        log_thread_event("STARTED", self)
         import asyncio
 
         try:
@@ -104,6 +118,8 @@ class DirectToolWorker(QThread):
             self.finished_ok.emit(result)
         except Exception as exc:
             self.failed.emit(str(exc))
+        finally:
+            log_thread_event("STOPPED", self)
 
 
 class ChatPanel(QWidget):
@@ -158,7 +174,16 @@ class ChatPanel(QWidget):
     def start_listening(self) -> None:
         if not self.listen_btn.isChecked():
             self.listen_btn.setChecked(True)
-            self._speak(f"I'm listening for {settings.ASSISTANT_NAME}.")
+            # Do NOT speak here. Previously this spoke "I'm listening for
+            # Nova" immediately, before the microphone/speech-recognition
+            # stack in VoiceListener had actually finished initializing --
+            # if anything in that init failed or was still mid-import when
+            # a second _speak() or an error path fired moments later, that
+            # was the exact race that produced overlapping/mismanaged
+            # speech threads. Now the greeting is deferred to
+            # _on_voice_ready, which only fires once VoiceListener's own
+            # run() has successfully imported everything and constructed
+            # its recognizer -- confirmed ready, not just "started."
 
     def stop_listening(self) -> None:
         if self.listen_btn.isChecked():
@@ -202,28 +227,29 @@ class ChatPanel(QWidget):
             self._voice_listener.transcript.connect(self._on_voice_transcript)
             self._voice_listener.status.connect(self._on_voice_status)
             self._voice_listener.failed.connect(self._on_voice_error)
+            self._voice_listener.ready.connect(self._on_voice_ready)
             self._voice_listener.finished.connect(lambda: self.listen_btn.setChecked(False))
             self._voice_listener.start()
             self.fsm.start()
         elif self._voice_listener:
             # `sd.rec()` inside VoiceListener.run() blocks for up to 5
             # seconds per cycle; stop() calls sd.stop() to abort that
-            # blocking call from here, but that's not instantaneous, and a
-            # short wait() timeout that's simply ignored on timeout is the
-            # exact same "drop the reference to a still-running QThread"
-            # crash SpeechManager was written to fix, just for a different
-            # attribute. Give it a real margin (the recording window plus
-            # slack) and, if it still hasn't finished, defer clearing the
-            # reference to the thread's own `finished` signal instead of
-            # guessing — never null it out from here while it might still
-            # be alive.
+            # blocking call from here, but that's not instantaneous.
+            # stop_and_release (core/thread_safety.py) is the one place
+            # this "wait, then only release if actually finished" logic
+            # lives now -- see that module's docstring for why this used
+            # to be reimplemented ad hoc in three different places, and
+            # why one of those three (closeEvent) still had the broken
+            # version until this change.
             listener = self._voice_listener
-            listener.stop()
-            if listener.wait(6000):
-                self._voice_listener = None
-            else:
-                listener.finished.connect(lambda: setattr(self, "_voice_listener", None))
+            stop_and_release(listener, listener.stop, 6000, lambda: setattr(self, "_voice_listener", None))
             self.fsm.stop()
+
+    def _on_voice_ready(self) -> None:
+        # Fires once per VoiceListener, right before it enters its listen
+        # loop -- this is the actual "audio system confirmed ready"
+        # moment, not just "the thread object was started."
+        self._speak(f"I'm listening for {settings.ASSISTANT_NAME}.")
 
     def _on_voice_transcript(self, message: str) -> None:
         # WAKE_DETECTED/VERIFYING/rejection are handled inside VoiceListener
@@ -376,9 +402,17 @@ class ChatPanel(QWidget):
             self._append("Nova", "Okay, I won't do that.")
 
     def closeEvent(self, event) -> None:  # noqa: N802
+        # Previously: `self._voice_listener.wait(2000)` followed by an
+        # UNCONDITIONAL `self._voice_listener = None` regardless of
+        # whether wait() actually succeeded. sd.rec() can block up to 5s,
+        # so a 2s wait routinely timed out, and this then dropped the
+        # reference to a QThread that was, provably, still running --
+        # exactly the bug this whole file has been fixed for twice
+        # already in other methods (_toggle_voice's off-branch,
+        # main.py's _shutdown_threads), just missed here. Routed through
+        # the same shared helper now so this can't happen a third time.
         self.stop_listening()
-        if self._voice_listener is not None:
-            self._voice_listener.wait(2000)
-            self._voice_listener = None
+        listener = self._voice_listener
+        stop_and_release(listener, (listener.stop if listener else lambda: None), 6000, lambda: setattr(self, "_voice_listener", None))
         self._speech.shutdown()
         event.accept()

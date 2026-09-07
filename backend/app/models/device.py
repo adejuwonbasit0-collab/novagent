@@ -4,7 +4,7 @@ import enum
 import uuid
 
 from sqlalchemy import Boolean, DateTime, Enum as SAEnum, ForeignKey, String
-from sqlalchemy.dialects.postgresql import UUID
+from sqlalchemy import UUID  # generic 2.0 type -- native UUID on postgres, CHAR(32) elsewhere, so sqlite works for local dev too
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.core.database import Base

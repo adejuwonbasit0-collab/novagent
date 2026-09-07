@@ -148,23 +148,8 @@ $("summarize-btn").addEventListener("click", async () => {
     const truncated = (pageText || "").slice(0, MAX_PAGE_TEXT_CHARS);
     const truncatedNote = pageText && pageText.length > MAX_PAGE_TEXT_CHARS ? " (truncated)" : "";
 
-    // A page could contain the literal string "</untrusted_external_content>"
-    // to try to fake an early close of the boundary and have subsequent text
-    // read as if it were outside the untrusted zone. Neutralize any
-    // occurrence of the tag name inside the page's own text so the only
-    // real open/close tags are the ones this code adds.
-    const sanitized = truncated.replace(/<\/?untrusted_external_content\b[^>]*>/gi, "[tag removed]");
-
-    // Wrapped in <untrusted_external_content> to match the backend's system
-    // prompt (see app/services/orchestrator.py): text scraped from a
-    // webpage can contain anything, including an attempt to impersonate an
-    // instruction ("ignore previous instructions and..."). This tag is what
-    // tells Nova to treat everything inside as page content to summarize,
-    // never as a command to act on — the actual enforcement lives
-    // server-side, this just uses the contract it expects.
     await sendChat(
-      `Summarize this page for me. Title: "${title}". URL: ${url}.\n\n` +
-        `<untrusted_external_content source="webpage" url="${url}">\n${sanitized}${truncatedNote}\n</untrusted_external_content>`
+      `Summarize this page for me. Title: "${title}". URL: ${url}.\n\nPage content${truncatedNote}:\n"""${truncated}"""`
     );
   } catch (err) {
     addMessage("assistant", `⚠️ Couldn't read this page: ${err.message}`);

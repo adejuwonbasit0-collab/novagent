@@ -1,0 +1,93 @@
+version: "3.9"
+
+# One-command hosting for the two pieces that actually run on a server:
+# the backend API and the dashboard website. `docker compose up -d` at the
+# repo root brings up postgres, redis, the backend (migrations run
+# automatically on every start — see backend/Dockerfile), and the
+# dashboard, wired together.
+#
+# The desktop agent is NOT part of this compose file, and can never be: it
+# needs the END USER's own microphone, filesystem, and OS control APIs
+# (spec section 2 says exactly this — it's the "execution layer" that runs
+# on each user's machine). Nothing running on your server can reach a
+# user's mic or launch Notepad on their laptop; that's why it's a separate
+# download from the dashboard's "Get Nova" page, not a container here.
+# Backend + dashboard are what you host; the desktop agent is what your
+# users install locally — same relationship as, say, Slack's web app vs.
+# the Slack desktop client.
+#
+# Usage:
+#   cp .env.example .env   # fill in JWT_SECRET_KEY and ANTHROPIC_API_KEY at minimum
+#   docker compose up -d --build
+# Dashboard: http://localhost:3000
+# Backend API docs: http://localhost:8000/docs
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-nova}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-nova_password}
+      POSTGRES_DB: ${POSTGRES_DB:-nova_db}
+    volumes:
+      - nova_pg_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-nova} -d ${POSTGRES_DB:-nova_db}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+
+  backend:
+    build: ./backend
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_started
+    environment:
+      APP_NAME: ${APP_NAME:-Nova Assistant Platform}
+      ENVIRONMENT: ${ENVIRONMENT:-production}
+      DEBUG: ${DEBUG:-false}
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-nova}:${POSTGRES_PASSWORD:-nova_password}@postgres:5432/${POSTGRES_DB:-nova_db}
+      REDIS_URL: redis://redis:6379/0
+      JWT_SECRET_KEY: ${JWT_SECRET_KEY:?set a long random JWT_SECRET_KEY in .env}
+      JWT_ALGORITHM: ${JWT_ALGORITHM:-HS256}
+      ACCESS_TOKEN_EXPIRE_MINUTES: ${ACCESS_TOKEN_EXPIRE_MINUTES:-30}
+      REFRESH_TOKEN_EXPIRE_DAYS: ${REFRESH_TOKEN_EXPIRE_DAYS:-30}
+      CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:3000}
+      DEVICE_TOKEN_EXPIRE_DAYS: ${DEVICE_TOKEN_EXPIRE_DAYS:-90}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      ANTHROPIC_MODEL: ${ANTHROPIC_MODEL:-claude-sonnet-5}
+      PENDING_CONFIRMATION_TTL_MINUTES: ${PENDING_CONFIRMATION_TTL_MINUTES:-5}
+      VOICE_PROVIDER: ${VOICE_PROVIDER:-mock}
+      ELEVENLABS_API_KEY: ${ELEVENLABS_API_KEY:-}
+      VOICE_STORAGE_DIR: ./data/voice_samples
+      MAX_VOICE_SAMPLE_BYTES: ${MAX_VOICE_SAMPLE_BYTES:-26214400}
+    ports:
+      - "8000:8000"
+    volumes:
+      - nova_voice_samples:/app/data/voice_samples
+
+  dashboard:
+    build: ./dashboard
+    restart: unless-stopped
+    depends_on:
+      - backend
+    environment:
+      # No NEXT_PUBLIC_ prefix on purpose (see dashboard/lib/server-auth.ts)
+      # -- the browser never talks to the backend directly, only this
+      # container's own server-side code does, so the backend's address
+      # never needs to be exposed to the client bundle.
+      BACKEND_URL: http://backend:8000
+    ports:
+      - "3000:3000"
+
+volumes:
+  nova_pg_data:
+  nova_voice_samples:
