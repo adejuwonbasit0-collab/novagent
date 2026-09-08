@@ -15,8 +15,14 @@ from app.models.reminder import Reminder
 from app.models.user import User, UserRole, UserStatus
 from app.schemas.admin import AdminAuditLogOut, AdminDeviceOut, AdminStatsOut, AdminUserOut, AdminUserUpdate
 from app.schemas.ai_provider import AIProviderSettingsOut, AIProviderSettingsUpdate
-from app.schemas.platform_settings import AssistantNameOut, AssistantNameUpdate
+from app.schemas.platform_settings import (
+    AssistantNameOut,
+    AssistantNameUpdate,
+    PlatformBrandingOut,
+    PlatformBrandingUpdate,
+)
 from app.core.security import encrypt_provider_key
+from app.services.connection_manager import connection_manager
 
 def _user_to_admin_out(user: User, device_count: int) -> AdminUserOut:
     return AdminUserOut(
@@ -45,6 +51,61 @@ async def _get_platform_settings(db: AsyncSession) -> PlatformSettings:
     return settings
 
 
+def _branding_out(s: PlatformSettings) -> PlatformBrandingOut:
+    return PlatformBrandingOut(
+        site_name=s.site_name,
+        site_description=s.site_description,
+        logo_url=s.logo_url,
+        favicon_url=s.favicon_url,
+        primary_icon_url=s.primary_icon_url,
+        desktop_icon_url=s.desktop_icon_url,
+        mobile_icon_url=s.mobile_icon_url,
+        footer_text=s.footer_text,
+        seo_title=s.seo_title,
+        seo_description=s.seo_description,
+        theme=s.theme,
+        accent_color=s.accent_color,
+        assistant_name=s.assistant_name,
+        assistant_greeting=s.assistant_greeting,
+        assistant_personality=s.assistant_personality,
+        default_language=s.default_language,
+        default_voice=s.default_voice,
+    )
+
+
+@router.get("/branding", response_model=PlatformBrandingOut)
+async def get_platform_branding(admin: User = Depends(get_current_admin), db: AsyncSession = Depends(get_db)):
+    settings = await _get_platform_settings(db)
+    return _branding_out(settings)
+
+
+@router.put("/branding", response_model=PlatformBrandingOut)
+async def update_platform_branding(
+    payload: PlatformBrandingUpdate,
+    admin: User = Depends(get_current_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    settings = await _get_platform_settings(db)
+    for field, val in payload.model_dump().items():
+        setattr(settings, field, val)
+    await db.commit()
+    await db.refresh(settings)
+
+    # Broadcast live to connected desktop agents and mobile clients
+    await connection_manager.broadcast_config_update({
+        "assistant_name": settings.assistant_name,
+        "assistant_greeting": settings.assistant_greeting,
+        "assistant_personality": settings.assistant_personality,
+        "default_language": settings.default_language,
+        "default_voice": settings.default_voice,
+        "desktop_icon_url": settings.desktop_icon_url,
+        "theme": settings.theme,
+        "accent_color": settings.accent_color,
+    })
+
+    return _branding_out(settings)
+
+
 @router.get("/assistant-name", response_model=AssistantNameOut)
 async def get_assistant_name(admin: User = Depends(get_current_admin), db: AsyncSession = Depends(get_db)):
     settings = await _get_platform_settings(db)
@@ -60,6 +121,9 @@ async def update_assistant_name(
     settings = await _get_platform_settings(db)
     settings.assistant_name = payload.assistant_name.strip()
     await db.commit()
+
+    await connection_manager.broadcast_config_update({"assistant_name": settings.assistant_name})
+
     return AssistantNameOut(assistant_name=settings.assistant_name)
 
 
@@ -197,6 +261,23 @@ async def update_user(
 
     count_result = await db.execute(select(func.count()).select_from(Device).where(Device.user_id == user.id))
     return _user_to_admin_out(user, count_result.scalar_one())
+
+
+@router.delete("/users/{user_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_user(
+    user_id: uuid.UUID,
+    admin: User = Depends(get_current_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    if user_id == admin.id:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="You cannot delete your own admin account")
+    result = await db.execute(select(User).where(User.id == user_id))
+    user = result.scalar_one_or_none()
+    if user is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
+    await db.delete(user)
+    await db.commit()
+    return None
 
 
 @router.get("/devices", response_model=list[AdminDeviceOut])

@@ -112,6 +112,13 @@ class VoiceService(QObject):
     def speak(self, text: str) -> None:
         self._speech.speak(text)
 
+    def update_runtime_config(self, config: dict) -> None:
+        new_name = config.get("assistant_name")
+        if new_name and new_name != settings.ASSISTANT_NAME:
+            settings.ASSISTANT_NAME = new_name
+            if self._voice_listener is not None:
+                self._voice_listener.set_wake_name(new_name)
+
     def _set_startup_state(self, state: StartupState) -> None:
         self._startup_state = state
         self.startup_state_changed.emit(state)

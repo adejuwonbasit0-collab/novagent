@@ -3,7 +3,23 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.api.v1 import admin, assistant, auth, devices, knowledge, permissions, reminders, settings as settings_api, speaker, tools, voice, ws
+from app.api.v1 import (
+    admin,
+    assistant,
+    auth,
+    conversations,
+    devices,
+    health as health_api,
+    knowledge,
+    permissions,
+    reminders,
+    security,
+    settings as settings_api,
+    speaker,
+    tools,
+    voice,
+    ws,
+)
 from app.core.config import settings
 from app.services.connection_manager import connection_manager
 
@@ -31,7 +47,7 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(
     title=settings.APP_NAME,
-    version="0.1.0",
+    version="0.2.0",
     debug=settings.DEBUG,
     lifespan=lifespan,
 )
@@ -56,6 +72,9 @@ app.include_router(settings_api.router)
 app.include_router(tools.router)
 app.include_router(assistant.router)
 app.include_router(ws.router)
+app.include_router(security.router)
+app.include_router(health_api.router)
+app.include_router(conversations.router)
 
 
 @app.get("/health")

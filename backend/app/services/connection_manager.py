@@ -267,6 +267,15 @@ class DeviceConnectionManager:
         if pending and not pending.future.done():
             pending.future.set_result(payload)
 
+    async def broadcast_config_update(self, config_data: dict[str, Any]) -> None:
+        """Broadcasts real-time configuration update to all actively connected devices."""
+        payload = {"type": "config_updated", "config": config_data}
+        for ws in list(self._connections.values()):
+            try:
+                await ws.send_json(payload)
+            except Exception:
+                pass
+
 
 # Single process-wide instance — tools import this directly rather than
 # getting it via FastAPI dependency injection, since it needs to be the

@@ -51,6 +51,9 @@ class VoiceListener(QThread):
         self._language = language
         self._running = True
 
+    def set_wake_name(self, name: str) -> None:
+        self._wake_name = name.lower().strip()
+
     def stop(self) -> None:
         self._running = False
         try:

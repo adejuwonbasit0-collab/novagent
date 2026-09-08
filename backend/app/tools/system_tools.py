@@ -126,7 +126,64 @@ class OpenUrlTool(BaseTool):
         return await _dispatch_to_device("open_url", {"url": params.url}, ctx)
 
 
+class RestartComputerInput(BaseModel):
+    pass
+
+
+class RestartComputerTool(BaseTool):
+    name = "restart_computer"
+    description = "Restart the user's computer. Always requires explicit confirmation."
+    input_schema = RestartComputerInput
+    required_permission = PermissionScope.SYSTEM_SHUTDOWN
+    risk_level = RiskLevel.HIGH
+    requires_confirmation = True
+    supported_platforms = ("windows", "macos", "linux")
+    timeout_seconds = 20.0
+
+    async def _run(self, params: RestartComputerInput, ctx: ToolExecutionContext) -> ToolResponse:
+        return await _dispatch_to_device("restart_computer", {}, ctx)
+
+
+class TakeScreenshotInput(BaseModel):
+    pass
+
+
+class TakeScreenshotTool(BaseTool):
+    name = "take_screenshot"
+    description = "Capture a screenshot of the user's current display screen."
+    input_schema = TakeScreenshotInput
+    required_permission = PermissionScope.SCREEN_READ
+    risk_level = RiskLevel.LOW
+    requires_confirmation = False
+    supported_platforms = ("windows", "macos", "linux")
+    timeout_seconds = 20.0
+
+    async def _run(self, params: TakeScreenshotInput, ctx: ToolExecutionContext) -> ToolResponse:
+        return await _dispatch_to_device("take_screenshot", {}, ctx)
+
+
+class ShowDesktopInput(BaseModel):
+    pass
+
+
+class ShowDesktopTool(BaseTool):
+    name = "show_desktop"
+    description = "Minimize active application windows and show the desktop."
+    input_schema = ShowDesktopInput
+    required_permission = PermissionScope.APP_OPEN
+    risk_level = RiskLevel.LOW
+    requires_confirmation = False
+    supported_platforms = ("windows", "macos", "linux")
+    timeout_seconds = 20.0
+
+    async def _run(self, params: ShowDesktopInput, ctx: ToolExecutionContext) -> ToolResponse:
+        return await _dispatch_to_device("show_desktop", {}, ctx)
+
+
 ToolRegistry.register(ShutdownComputerTool())
+ToolRegistry.register(RestartComputerTool())
 ToolRegistry.register(LockComputerTool())
 ToolRegistry.register(OpenApplicationTool())
 ToolRegistry.register(OpenUrlTool())
+ToolRegistry.register(TakeScreenshotTool())
+ToolRegistry.register(ShowDesktopTool())

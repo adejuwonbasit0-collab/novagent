@@ -62,11 +62,24 @@ class WindowsController(OSController):
                 "chrome": "chrome.exe",
                 "google chrome": "chrome.exe",
                 "notepad": "notepad.exe",
+                "wordpad": "write.exe",
+                "word pad": "write.exe",
+                "paint": "mspaint.exe",
+                "calculator": "calc.exe",
+                "calc": "calc.exe",
                 "settings": "ms-settings:",
+                "windows settings": "ms-settings:",
                 "control panel": "control.exe",
+                "file explorer": "explorer.exe",
+                "explorer": "explorer.exe",
+                "cmd": "cmd.exe",
+                "terminal": "wt.exe",
+                "powershell": "powershell.exe",
+                "task manager": "taskmgr.exe",
             }
             previous_hwnd = _get_foreground_window()
-            os.startfile(aliases.get(app_name.lower().strip(), app_name))  # type: ignore[attr-defined]
+            target = aliases.get(app_name.lower().strip(), app_name)
+            os.startfile(target)  # type: ignore[attr-defined]
             _wait_for_new_foreground_window(previous_hwnd)
             return OSActionResult(success=True, message=f"Opened {app_name}")
         except Exception as e:
@@ -227,5 +240,62 @@ class WindowsController(OSController):
                 content = content[:max_chars]
             note = f"\n\n[... truncated, file continues past {max_chars} characters]" if truncated else ""
             return OSActionResult(success=True, message=content + note)
+        except Exception as e:
+            return OSActionResult(success=False, message="", error=str(e))
+
+    def take_screenshot(self) -> OSActionResult:
+        try:
+            from datetime import datetime
+            save_dir = os.path.expanduser("~/Pictures/Screenshots")
+            os.makedirs(save_dir, exist_ok=True)
+            filename = f"screenshot_{datetime.now().strftime('%Y%m%d_%H%M%S')}.png"
+            full_path = os.path.join(save_dir, filename)
+
+            try:
+                import pyautogui
+                screenshot = pyautogui.screenshot()
+                screenshot.save(full_path)
+            except Exception:
+                from PIL import ImageGrab
+                screenshot = ImageGrab.grab()
+                screenshot.save(full_path)
+
+            return OSActionResult(success=True, message=f"Screenshot saved to {full_path}")
+        except Exception as e:
+            return OSActionResult(success=False, message="", error=str(e))
+
+    def show_desktop(self) -> OSActionResult:
+        try:
+            try:
+                import pyautogui
+                pyautogui.hotkey('win', 'd')
+            except Exception:
+                subprocess.run(["powershell", "-Command", "(New-Object -ComObject Shell.Application).MinimizeAll()"], check=True)
+            return OSActionResult(success=True, message="Desktop displayed (all windows minimized)")
+        except Exception as e:
+            return OSActionResult(success=False, message="", error=str(e))
+
+    def rename_file(self, old_path: str, new_path: str) -> OSActionResult:
+        try:
+            src = os.path.expandvars(os.path.expanduser(old_path))
+            dst = os.path.expandvars(os.path.expanduser(new_path))
+            if not os.path.exists(src):
+                return OSActionResult(success=False, message="", error=f"Source file not found at {old_path}")
+            os.rename(src, dst)
+            return OSActionResult(success=True, message=f"Renamed {old_path} to {new_path}")
+        except Exception as e:
+            return OSActionResult(success=False, message="", error=str(e))
+
+    def delete_file(self, path: str) -> OSActionResult:
+        try:
+            full_path = os.path.expandvars(os.path.expanduser(path))
+            if not os.path.exists(full_path):
+                return OSActionResult(success=False, message="", error=f"File not found at {path}")
+            if os.path.isdir(full_path):
+                shutil.rmtree(full_path)
+                return OSActionResult(success=True, message=f"Deleted directory {path}")
+            else:
+                os.remove(full_path)
+                return OSActionResult(success=True, message=f"Deleted file {path}")
         except Exception as e:
             return OSActionResult(success=False, message="", error=str(e))

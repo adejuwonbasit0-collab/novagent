@@ -170,7 +170,28 @@ $("summarize-btn").addEventListener("click", async () => {
     addMessage("assistant", `⚠️ Couldn't read this page: ${err.message}`);
   } finally {
     $("summarize-btn").disabled = false;
-    $("summarize-btn").textContent = "Summarize this page";
+    $("summarize-btn").textContent = "Summarize";
+  }
+});
+
+$("scan-phishing-btn").addEventListener("click", async () => {
+  const url = pageContextEl.dataset.url;
+  if (!url) return;
+
+  $("scan-phishing-btn").disabled = true;
+  $("scan-phishing-btn").textContent = "Scanning…";
+  setState("thinking");
+
+  try {
+    const res = await NovaAPI.checkPhishing(url);
+    const badge = res.verdict === "MALICIOUS" ? "🚨 MALICIOUS" : res.verdict === "SUSPICIOUS" ? "⚠️ SUSPICIOUS" : "✅ SAFE";
+    addMessage("assistant", `Phishing Analysis for ${url}:\nVerdict: ${badge} (Risk: ${res.risk_level})\nConfidence: ${Math.round(res.confidence * 100)}%\n${res.detected_indicators?.length ? "Indicators: " + res.detected_indicators.join(", ") : "No threat patterns found."}`);
+  } catch (err) {
+    addMessage("assistant", `⚠️ Scan failed: ${err.message}`);
+  } finally {
+    setState("idle");
+    $("scan-phishing-btn").disabled = false;
+    $("scan-phishing-btn").textContent = "Scan URL";
   }
 });
 

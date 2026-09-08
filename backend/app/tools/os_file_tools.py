@@ -141,5 +141,41 @@ class ReadFileTool(BaseTool):
         return await dispatch(self.name, params.model_dump(), ctx)
 
 
+class RenameFileInput(BaseModel):
+    old_path: str = Field(description="Current full path of the file or folder")
+    new_path: str = Field(description="New full path or name for the file or folder")
+
+
+class RenameFileTool(BaseTool):
+    name = "rename_file"
+    description = "Rename a file or folder on the connected computer."
+    input_schema = RenameFileInput
+    required_permission = PermissionScope.FILES_WRITE
+    risk_level = RiskLevel.MEDIUM
+    supported_platforms = ("windows", "macos", "linux")
+
+    async def _run(self, params: RenameFileInput, ctx: ToolExecutionContext) -> ToolResponse:
+        return await dispatch(self.name, params.model_dump(), ctx)
+
+
+class DeleteFileInput(BaseModel):
+    path: str = Field(description="Full path of the file to permanently delete")
+
+
+class DeleteFileTool(BaseTool):
+    name = "delete_file"
+    description = "Permanently delete a file on the connected computer. Always requires explicit confirmation."
+    input_schema = DeleteFileInput
+    required_permission = PermissionScope.FILES_WRITE
+    risk_level = RiskLevel.HIGH
+    requires_confirmation = True
+    supported_platforms = ("windows", "macos", "linux")
+
+    async def _run(self, params: DeleteFileInput, ctx: ToolExecutionContext) -> ToolResponse:
+        return await dispatch(self.name, params.model_dump(), ctx)
+
+
 ToolRegistry.register(GetActiveWindowTool())
 ToolRegistry.register(ReadFileTool())
+ToolRegistry.register(RenameFileTool())
+ToolRegistry.register(DeleteFileTool())

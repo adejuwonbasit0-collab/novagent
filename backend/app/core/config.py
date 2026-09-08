@@ -27,16 +27,16 @@ class Settings(BaseSettings):
     ENVIRONMENT: str = "development"
     DEBUG: bool = True
 
-    DATABASE_URL: str
+    DATABASE_URL: str = "sqlite+aiosqlite:///./nova.db"
     REDIS_URL: str = "redis://localhost:6379/0"
 
-    JWT_SECRET_KEY: str
+    JWT_SECRET_KEY: str = "nova_default_dev_jwt_secret_key_change_in_production_32bytes"
     JWT_ALGORITHM: str = "HS256"
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 30
     REFRESH_TOKEN_EXPIRE_DAYS: int = 30
     DEVICE_TOKEN_EXPIRE_DAYS: int = 90
 
-    CORS_ORIGINS: str = "http://localhost:3000"
+    CORS_ORIGINS: str = "http://localhost:3000,http://127.0.0.1:3000"
 
     # --- AI orchestration ---
     ANTHROPIC_API_KEY: str | None = None

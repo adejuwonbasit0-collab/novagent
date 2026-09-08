@@ -118,5 +118,6 @@ const NovaAPI = (() => {
     chat: (message) => request("POST", "/api/v1/assistant/chat", { json: { message, client_local_time: localIsoWithOffset() } }),
     confirmPending: (pendingId) => request("POST", `/api/v1/assistant/confirm/${pendingId}`),
     listReminders: () => request("GET", "/api/v1/reminders"),
+    checkPhishing: (url, content) => request("POST", "/api/v1/security/phishing-check", { json: { url, content } }),
   };
 })();

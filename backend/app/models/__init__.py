@@ -18,7 +18,8 @@ from app.models.speaker_profile import (
     SpeakerProfile,
     SpeakerProfileStatus,
 )
-from app.models.user import User, UserRole, UserStatus
+from app.models.conversation import Conversation, Message
+from app.models.security_event import SecurityEvent, SecurityEventType, SecurityRiskLevel
 from app.models.voice import (
     ProfileStatus,
     TONE_PRESET_SETTINGS,
@@ -55,6 +56,11 @@ __all__ = [
     "User",
     "UserRole",
     "UserStatus",
+    "Conversation",
+    "Message",
+    "SecurityEvent",
+    "SecurityEventType",
+    "SecurityRiskLevel",
     "ProfileStatus",
     "TONE_PRESET_SETTINGS",
     "TonePreset",

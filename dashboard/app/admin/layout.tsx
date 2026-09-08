@@ -6,8 +6,11 @@ import { useRequireAdmin, useAuth } from "@/lib/auth";
 
 const ADMIN_NAV = [
   { href: "/admin", label: "Overview" },
+  { href: "/admin/branding", label: "Branding & CMS" },
   { href: "/admin/ai-provider", label: "AI Provider" },
   { href: "/admin/settings", label: "Assistant identity" },
+  { href: "/admin/users", label: "User Management" },
+  { href: "/admin/health", label: "System Health" },
 ];
 
 /**

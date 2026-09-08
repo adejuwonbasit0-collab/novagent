@@ -51,3 +51,7 @@ build/
 # Local data that should never be committed
 backend/data/voice_samples/*
 !backend/data/voice_samples/.gitkeep
+*.db
+*.sqlite
+*.sqlite3
+test_nova.db

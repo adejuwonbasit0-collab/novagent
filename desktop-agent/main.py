@@ -78,6 +78,7 @@ class NovaAgentApp:
 
         self.ws_client = DeviceWebSocketClient()
         self.ws_client.device_rejected.connect(self._on_device_rejected)
+        self.ws_client.config_updated.connect(self._on_config_updated)
         self._ws_thread: threading.Thread | None = None
         self._health_worker: HealthCheckWorker | None = None
         self._health_timer = QTimer()
@@ -96,12 +97,19 @@ class NovaAgentApp:
     def _on_fsm_state_changed(self, state: ConversationState) -> None:
         self.bubble.set_state(state)
 
+    def _on_config_updated(self, config: dict) -> None:
+        self.voice_service.update_runtime_config(config)
+        new_name = config.get("assistant_name")
+        if new_name:
+            self.chat_panel.set_assistant_name(new_name)
+
     def _shutdown(self) -> None:
         """Spec section 18's shutdown order. Every step below either has
         a real wait()/timeout or delegates to something that does
         (VoiceService.shutdown mirrors this same rule internally) --
         nothing here drops a QThread reference without confirming it
         actually finished first."""
+        self.chat_panel.cleanup()
         self.voice_service.shutdown()  # stop wake listener -> stop TTS -> wait
         if self._health_worker is not None and self._health_worker.isRunning():
             self._health_worker.wait(3000)  # stop network workers

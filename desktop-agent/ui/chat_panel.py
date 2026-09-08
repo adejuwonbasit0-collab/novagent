@@ -95,7 +95,7 @@ class ChatPanel(QWidget):
     def __init__(self, client: NovaAPIClient, voice_service: VoiceService):
         super().__init__()
         self._client = client
-        self._worker: QThread | None = None
+        self._active_workers: set[QThread] = set()
         self._voice_service = voice_service
 
         # Single source of truth for "what is Nova doing right now" (spec
@@ -109,7 +109,7 @@ class ChatPanel(QWidget):
         voice_service.listening_changed.connect(self._on_listening_changed)
 
         self.setWindowFlags(Qt.WindowType.Tool | Qt.WindowType.WindowStaysOnTopHint)
-        self.setWindowTitle("Nova")
+        self.setWindowTitle(settings.ASSISTANT_NAME)
         self.resize(380, 480)
 
         layout = QVBoxLayout(self)
@@ -119,7 +119,7 @@ class ChatPanel(QWidget):
         layout.addWidget(self.history)
 
         self.input = QLineEdit()
-        self.input.setPlaceholderText("Ask Nova anything…")
+        self.input.setPlaceholderText(f"Ask {settings.ASSISTANT_NAME} anything…")
         self.input.returnPressed.connect(self._on_submit)
         layout.addWidget(self.input)
 
@@ -135,6 +135,23 @@ class ChatPanel(QWidget):
         self.voice_setup_btn = QPushButton("Set up voice verification")
         self.voice_setup_btn.clicked.connect(self._open_voice_enrollment)
         layout.addWidget(self.voice_setup_btn)
+
+    def set_assistant_name(self, name: str) -> None:
+        self.setWindowTitle(name)
+        self.input.setPlaceholderText(f"Ask {name} anything…")
+        if not self._voice_service.is_listening:
+            self.listen_btn.setText(f"Start listening for {name}")
+        else:
+            self.listen_btn.setText(f"Listening for {name}")
+
+    def _track_and_start(self, worker: QThread) -> None:
+        self._active_workers.add(worker)
+        worker.finished.connect(lambda: self._on_worker_done(worker))
+        worker.start()
+
+    def _on_worker_done(self, worker: QThread) -> None:
+        self._active_workers.discard(worker)
+        worker.deleteLater()
 
     def _append(self, who: str, text: str) -> None:
         self.history.append(f"<b>{who}:</b> {text}")
@@ -230,8 +247,8 @@ class ChatPanel(QWidget):
         # total silence. That reads exactly like "it just stopped and
         # didn't reply," even though the app was working correctly and
         # simply hadn't finished the previous request yet.
-        if self._worker is not None and self._worker.isRunning():
-            self._append("Nova", "Still working on the last request — one moment.")
+        if any(w.isRunning() for w in self._active_workers):
+            self._append(settings.ASSISTANT_NAME, "Still working on the last request — one moment.")
             self._speak("One moment, I'm still working on that.")
             return
 
@@ -242,13 +259,7 @@ class ChatPanel(QWidget):
 
         routed = route_locally(message)
         if isinstance(routed, dict) and "unsupported" in routed:
-            # Recognized as a local-sounding request for a capability that
-            # doesn't exist end-to-end yet (spec section 47: never let a
-            # command pretend to work). Answered directly, zero network
-            # calls, instead of falling through to the cloud LLM, which
-            # has no tool for this either and might otherwise imply it
-            # happened.
-            self._append("Nova", routed["unsupported"])
+            self._append(settings.ASSISTANT_NAME, routed["unsupported"])
             self._speak(routed["unsupported"])
             self.input.setEnabled(True)
             self.send_btn.setEnabled(True)
@@ -256,42 +267,34 @@ class ChatPanel(QWidget):
 
         if routed is not None:
             self.fsm.on_executing()
-            self._worker = DirectToolWorker(self._client, routed.tool_name, routed.params)
-            self._worker.finished_ok.connect(self._on_direct_reply)
-            self._worker.failed.connect(self._on_error)
-            self._worker.start()
+            worker = DirectToolWorker(self._client, routed.tool_name, routed.params)
+            worker.finished_ok.connect(self._on_direct_reply)
+            worker.failed.connect(self._on_error)
+            self._track_and_start(worker)
             return
 
         self.fsm.on_thinking()
-        self._worker = ChatWorker(self._client, message)
-        self._worker.finished_ok.connect(self._on_reply)
-        self._worker.failed.connect(self._on_error)
-        self._worker.start()
+        chat_worker = ChatWorker(self._client, message)
+        chat_worker.finished_ok.connect(self._on_reply)
+        chat_worker.failed.connect(self._on_error)
+        self._track_and_start(chat_worker)
 
     def _on_reply(self, reply: ChatReply) -> None:
-        self._append("Nova", reply.reply)
+        self._append(settings.ASSISTANT_NAME, reply.reply)
         self._speak(reply.reply)  # SpeechSpeaker drives fsm -> SPEAKING -> on_response_complete
 
         for call in reply.tool_calls:
             if call.result == "REQUIRES_CONFIRMATION":
                 self._handle_confirmation_needed(call)
             elif call.result == "DENIED":
-                self._append("Nova", f"⚠️ I don't have permission to do that ({call.tool_name}).")
+                self._append(settings.ASSISTANT_NAME, f"⚠️ I don't have permission to do that ({call.tool_name}).")
             elif call.result == "FAILURE":
-                self._append("Nova", f"⚠️ {call.tool_name} failed: {call.error}")
-            # SUCCESS: reply.reply from the model already describes it; the
-            # raw call.data is available here for a richer UI card later.
+                self._append(settings.ASSISTANT_NAME, f"⚠️ {call.tool_name} failed: {call.error}")
 
         self.input.setEnabled(True)
         self.send_btn.setEnabled(True)
 
     def _on_direct_reply(self, result: ToolCallResult) -> None:
-        # Previously had no REQUIRES_CONFIRMATION case, so a locally
-        # fast-pathed high-risk tool (e.g. "shut down my computer") fell
-        # into the generic failure branch and told the user Nova "could
-        # not complete" the request -- even though the server correctly
-        # withheld the action pending confirmation. Route it through the
-        # same dialog the cloud/LLM path already uses.
         if result.result == "REQUIRES_CONFIRMATION":
             self._handle_confirmation_needed(result)
             self.input.setEnabled(True)
@@ -304,27 +307,22 @@ class ChatPanel(QWidget):
             message = f"I need the {result.error or 'required'} permission before I can do that."
         else:
             message = result.error or f"I could not complete {result.tool_name}."
-        self._append("Nova", message)
+        self._append(settings.ASSISTANT_NAME, message)
         self._speak(message)
         self.input.setEnabled(True)
         self.send_btn.setEnabled(True)
 
     def _on_error(self, error: str) -> None:
-        self._append("Nova", f"⚠️ Something went wrong: {error}")
+        self._append(settings.ASSISTANT_NAME, f"⚠️ Something went wrong: {error}")
         self.fsm.on_error()
         self._speak("I couldn't complete that request.")
         self.input.setEnabled(True)
         self.send_btn.setEnabled(True)
 
     def _handle_confirmation_needed(self, call: ToolCallResult) -> None:
-        """
-        Mirrors spec section 5's exact example: high-risk actions get a
-        real modal confirmation, never a silent auto-run — this is the UI
-        half of the backend's PendingToolCall gate.
-        """
         box = QMessageBox(self)
         box.setWindowTitle("Confirm action")
-        box.setText(call.message or f"Nova wants to run '{call.tool_name}'. Continue?")
+        box.setText(call.message or f"{settings.ASSISTANT_NAME} wants to run '{call.tool_name}'. Continue?")
         box.setStandardButtons(QMessageBox.StandardButton.Cancel | QMessageBox.StandardButton.Yes)
         box.setDefaultButton(QMessageBox.StandardButton.Cancel)
 
@@ -332,23 +330,20 @@ class ChatPanel(QWidget):
             self.fsm.on_executing()
             confirm_worker = ConfirmWorker(self._client, call.pending_id)
             confirm_worker.finished_ok.connect(
-                lambda result: self._append("Nova", result.message or f"{result.tool_name}: {result.result}")
+                lambda result: self._append(settings.ASSISTANT_NAME, result.message or f"{result.tool_name}: {result.result}")
             )
-            confirm_worker.failed.connect(lambda err: self._append("Nova", f"⚠️ Confirmation failed: {err}"))
+            confirm_worker.failed.connect(lambda err: self._append(settings.ASSISTANT_NAME, f"⚠️ Confirmation failed: {err}"))
             confirm_worker.finished.connect(self.fsm.on_response_complete)
-            confirm_worker.start()
-            self._confirm_worker = confirm_worker  # keep a reference so it isn't garbage-collected mid-run
+            self._track_and_start(confirm_worker)
         else:
-            self._append("Nova", "Okay, I won't do that.")
+            self._append(settings.ASSISTANT_NAME, "Okay, I won't do that.")
+
+    def cleanup(self) -> None:
+        for worker in list(self._active_workers):
+            if worker.isRunning():
+                worker.quit()
+                worker.wait(1000)
+        self._active_workers.clear()
 
     def closeEvent(self, event) -> None:  # noqa: N802
-        # Spec section 9, made concrete: this window closing must not
-        # touch the voice pipeline at all. The old version stopped
-        # VoiceListener here (and had its own version of the "drop a
-        # possibly-still-running QThread reference" bug on top of that,
-        # since it duplicated -- and only partially matched -- the fix
-        # already applied in _toggle_voice). VoiceService now owns that
-        # lifecycle independently of this panel's existence, so closing
-        # the chat window is just a normal window close: hide, nothing
-        # more.
         event.accept()

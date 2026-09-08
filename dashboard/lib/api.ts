@@ -118,6 +118,116 @@ export interface AdminUser {
   device_count: number;
 }
 
+export interface PhishingIndicator {
+  category: string;
+  severity: string;
+  description: string;
+}
+
+export interface PhishingCheckResponse {
+  risk_level: "LOW" | "MEDIUM" | "HIGH" | "CRITICAL";
+  risk_score: number;
+  summary: string;
+  indicators: PhishingIndicator[];
+  recommendations: string[];
+}
+
+export interface FraudIndicator {
+  category: string;
+  severity: string;
+  description: string;
+}
+
+export interface FraudCheckResponse {
+  risk_level: "LOW" | "MEDIUM" | "HIGH" | "CRITICAL";
+  risk_score: number;
+  is_confirmed_fraud: boolean;
+  summary: string;
+  indicators: FraudIndicator[];
+  recommendations: string[];
+}
+
+export interface SecurityEvent {
+  id: string;
+  user_id: string | null;
+  device_id: string | null;
+  event_type: string;
+  risk_level: string;
+  risk_score: number;
+  ip_address: string | null;
+  user_agent: string | null;
+  location_summary: string | null;
+  description: string;
+  details_json: string | null;
+  created_at: string;
+}
+
+export interface SecurityStats {
+  total_events: number;
+  failed_logins_24h: number;
+  active_threats: number;
+  threat_score_avg: number;
+}
+
+export interface Message {
+  id: string;
+  conversation_id: string;
+  role: "user" | "assistant" | "system";
+  content: string;
+  tool_calls_json: string | null;
+  created_at: string;
+}
+
+export interface Conversation {
+  id: string;
+  title: string;
+  is_archived: boolean;
+  last_message_at: string;
+  created_at: string;
+  message_count: number;
+}
+
+export interface ConversationDetail extends Conversation {
+  messages: Message[];
+}
+
+export interface PlatformBranding {
+  site_name: string;
+  site_description: string;
+  logo_url: string | null;
+  favicon_url: string | null;
+  primary_icon_url: string | null;
+  desktop_icon_url: string | null;
+  mobile_icon_url: string | null;
+  footer_text: string | null;
+  seo_title: string | null;
+  seo_description: string | null;
+  theme: string;
+  accent_color: string;
+  assistant_name: string;
+  assistant_greeting: string;
+  assistant_personality: string;
+  default_language: string;
+  default_voice: string;
+}
+
+export interface ServiceComponentHealth {
+  status: string;
+  latency_ms?: number;
+  details: Record<string, unknown>;
+}
+
+export interface SystemHealth {
+  status: string;
+  version: string;
+  environment: string;
+  database: ServiceComponentHealth;
+  ai_provider: ServiceComponentHealth;
+  websocket: ServiceComponentHealth;
+  voice_service: ServiceComponentHealth;
+  storage: ServiceComponentHealth;
+}
+
 export interface AdminDevice {
   id: string;
   user_id: string;
@@ -400,5 +510,82 @@ export const api = {
 
   async deleteKnowledgeDocument(id: string) {
     return request<void>("DELETE", `/api/proxy/knowledge/documents/${id}`);
+  },
+
+  // ---- Security Center ----
+  async checkPhishing(text_content: string, sender_info?: string, urls?: string[]) {
+    return request<PhishingCheckResponse>("POST", "/api/proxy/security/phishing-check", {
+      text_content,
+      sender_info,
+      urls: urls || [],
+    });
+  },
+
+  async checkFraud(transaction_or_message: string, amount?: string, recipient?: string) {
+    return request<FraudCheckResponse>("POST", "/api/proxy/security/fraud-check", {
+      transaction_or_message,
+      amount,
+      recipient,
+    });
+  },
+
+  async getIpAuditLog(limit = 50, event_type?: string) {
+    const params = new URLSearchParams({ limit: String(limit) });
+    if (event_type) params.set("event_type", event_type);
+    return request<SecurityEvent[]>("GET", `/api/proxy/security/ip-audit?${params.toString()}`);
+  },
+
+  async getSecurityStats() {
+    return request<SecurityStats>("GET", "/api/proxy/security/stats");
+  },
+
+  // ---- Conversations ----
+  async listConversations(limit = 30) {
+    return request<Conversation[]>("GET", `/api/proxy/conversations?limit=${limit}`);
+  },
+
+  async createConversation(title = "New Conversation") {
+    return request<Conversation>("POST", "/api/proxy/conversations", { title });
+  },
+
+  async getConversation(id: string) {
+    return request<ConversationDetail>("GET", `/api/proxy/conversations/${id}`);
+  },
+
+  async updateConversation(id: string, title: string, is_archived?: boolean) {
+    return request<Conversation>("PATCH", `/api/proxy/conversations/${id}`, { title, is_archived });
+  },
+
+  async deleteConversation(id: string) {
+    return request<void>("DELETE", `/api/proxy/conversations/${id}`);
+  },
+
+  async addMessageToConversation(conversationId: string, role: string, content: string, toolCallsJson?: string) {
+    return request<Message>("POST", `/api/proxy/conversations/${conversationId}/messages`, {
+      role,
+      content,
+      tool_calls_json: toolCallsJson,
+    });
+  },
+
+  // ---- Admin Branding & System Health ----
+  async adminGetPlatformBranding() {
+    return request<PlatformBranding>("GET", "/api/proxy/admin/branding");
+  },
+
+  async adminUpdatePlatformBranding(payload: Partial<PlatformBranding>) {
+    return request<PlatformBranding>("PUT", "/api/proxy/admin/branding", payload);
+  },
+
+  async adminDeleteUser(userId: string) {
+    return request<void>("DELETE", `/api/proxy/admin/users/${userId}`);
+  },
+
+  async getPublicBranding() {
+    return request<PlatformBranding>("GET", "/api/proxy/settings/branding");
+  },
+
+  async getSystemHealth() {
+    return request<SystemHealth>("GET", "/api/proxy/health");
   },
 };

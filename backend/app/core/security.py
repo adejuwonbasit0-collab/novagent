@@ -33,17 +33,18 @@ def verify_password(plain_password: str, hashed_password: str) -> bool:
         return False
 
 
-def _create_token(subject: str, token_type: TokenType, expires_delta: timedelta, extra_claims: dict | None = None) -> str:
+def _create_token(subject: str | uuid.UUID, token_type: TokenType, expires_delta: timedelta, extra_claims: dict | None = None) -> str:
     now = datetime.now(timezone.utc)
     payload = {
-        "sub": subject,
+        "sub": str(subject),
         "type": token_type.value,
         "iat": now,
         "exp": now + expires_delta,
         "jti": str(uuid.uuid4()),  # unique id — enables future revocation/blacklisting
     }
     if extra_claims:
-        payload.update(extra_claims)
+        for k, v in extra_claims.items():
+            payload[k] = str(v) if isinstance(v, uuid.UUID) else v
     return jwt.encode(payload, settings.JWT_SECRET_KEY, algorithm=settings.JWT_ALGORITHM)
 
 

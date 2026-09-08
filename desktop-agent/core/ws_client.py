@@ -32,11 +32,15 @@ _TOOL_DISPATCH = {
     "shutdown_computer": lambda ctl, params: ctl.shutdown_computer(),
     "lock_computer": lambda ctl, params: ctl.lock_computer(),
     "restart_computer": lambda ctl, params: ctl.restart_computer(),
+    "take_screenshot": lambda ctl, params: ctl.take_screenshot(),
+    "show_desktop": lambda ctl, params: ctl.show_desktop(),
     "open_application": lambda ctl, params: ctl.open_application(params["app_name"]),
     "open_url": lambda ctl, params: ctl.open_url(params["url"]),
     "open_folder": lambda ctl, params: ctl.open_folder(params["path"]),
     "create_folder": lambda ctl, params: ctl.create_folder(params["path"]),
     "create_file": lambda ctl, params: ctl.create_file(params["path"], params.get("content", "")),
+    "rename_file": lambda ctl, params: ctl.rename_file(params["old_path"], params["new_path"]),
+    "delete_file": lambda ctl, params: ctl.delete_file(params["path"]),
     "type_text": lambda ctl, params: ctl.type_text(params["text"]),
     "open_folder_in_application": lambda ctl, params: ctl.open_folder_in_application(params["path"], params["app_name"]),
     "get_active_window": lambda ctl, params: ctl.get_active_window(),
@@ -71,6 +75,7 @@ class DeviceWebSocketClient(QObject):
     """
 
     device_rejected = Signal()
+    config_updated = Signal(dict)
 
     def __init__(self, controller: OSController | None = None):
         super().__init__()
@@ -123,7 +128,13 @@ class DeviceWebSocketClient(QObject):
             except json.JSONDecodeError:
                 continue
 
-            if message.get("type") != "command":
+            msg_type = message.get("type")
+            if msg_type == "config_updated":
+                config_data = message.get("config", {})
+                self.config_updated.emit(config_data)
+                continue
+
+            if msg_type != "command":
                 continue
 
             await self._handle_command(ws, message)

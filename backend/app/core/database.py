@@ -13,6 +13,8 @@ _engine_kwargs: dict = {"echo": settings.DEBUG, "pool_pre_ping": True}
 if not settings.DATABASE_URL.startswith("sqlite"):
     _engine_kwargs["pool_size"] = 10
     _engine_kwargs["max_overflow"] = 20
+else:
+    _engine_kwargs["connect_args"] = {"check_same_thread": False}
 
 engine = create_async_engine(settings.DATABASE_URL, **_engine_kwargs)
 

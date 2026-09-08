@@ -61,20 +61,26 @@ class OSController(ABC):
     # actual content back to the model.
     @abstractmethod
     def get_active_window(self) -> OSActionResult:
-        """message is a short human-readable description of the
-        foreground window (app name + title) for the model to read and
-        answer from -- not structured data, since that's all the
-        downstream tool-result plumbing (see backend/app/tools/base.py)
-        currently carries back to the model anyway."""
         ...
 
     @abstractmethod
     def read_file(self, path: str, max_chars: int = 20000) -> OSActionResult:
-        """message is the file's content (truncated at max_chars, with
-        that fact noted) for the model to actually read/review -- this is
-        what makes 'review my code' possible at all; create_file/
-        create_folder/type_text only ever wrote, nothing read a file's
-        content back."""
+        ...
+
+    @abstractmethod
+    def take_screenshot(self) -> OSActionResult:
+        ...
+
+    @abstractmethod
+    def show_desktop(self) -> OSActionResult:
+        ...
+
+    @abstractmethod
+    def rename_file(self, old_path: str, new_path: str) -> OSActionResult:
+        ...
+
+    @abstractmethod
+    def delete_file(self, path: str) -> OSActionResult:
         ...
 
 

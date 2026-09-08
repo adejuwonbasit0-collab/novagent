@@ -1,48 +1,87 @@
+param (
+    [switch]$NoAgent,
+    [switch]$NoDashboard,
+    [string]$Port = "8000"
+)
+
 $ErrorActionPreference = "Stop"
 $root = Split-Path -Parent $MyInvocation.MyCommand.Path
 $backend = Join-Path $root "backend"
 $dashboard = Join-Path $root "dashboard"
 $agent = Join-Path $root "desktop-agent"
 
-$apiUp = Get-NetTCPConnection -LocalPort 8000 -State Listen -ErrorAction SilentlyContinue
+Write-Host "=================================================" -ForegroundColor Cyan
+Write-Host "    NOVA ASSISTANT PLATFORM INITIALIZATION      " -ForegroundColor Cyan
+Write-Host "=================================================" -ForegroundColor Cyan
+
+# 1. Check Python Venv in backend
+$backendPy = Join-Path $backend ".venv\Scripts\python.exe"
+if (-not (Test-Path $backendPy)) {
+    Write-Host "[!] Backend virtual environment not found at $backendPy" -ForegroundColor Yellow
+    Write-Host "[*] Creating backend .venv..." -ForegroundColor Gray
+    python -m venv (Join-Path $backend ".venv")
+    & (Join-Path $backend ".venv\Scripts\pip.exe") install --prefer-binary -r (Join-Path $backend "requirements.txt")
+}
+
+# 2. Run Database Migrations (SQLite default: nova.db)
+Write-Host "[*] Applying database migrations..." -ForegroundColor Gray
+Push-Location $backend
+try {
+    & $backendPy -m alembic upgrade head
+    Write-Host "[+] Database migrations up to date." -ForegroundColor Green
+} catch {
+    Write-Host "[!] Migration warning: $_" -ForegroundColor Yellow
+} finally {
+    Pop-Location
+}
+
+# 3. Start Backend Server
+$apiUp = Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue
 if (-not $apiUp) {
+    Write-Host "[*] Launching Nova Backend API on http://127.0.0.1:$Port..." -ForegroundColor Green
     Start-Process powershell -ArgumentList @(
         "-NoExit",
         "-Command",
-        # BUG FIX (was the direct cause of the endless "WebSocket connection
-        # failed: [WinError 1225] remote computer refused the network
-        # connection" spam from the desktop agent): two things were wrong
-        # here. (1) credentials postgres/postgres123 don't exist -- this
-        # repo's docker-compose.yml and backend/.env.example both provision
-        # user "nova" / password "nova_password" -- so uvicorn crashed on
-        # startup before ever binding port 8000, and every desktop-agent
-        # reconnect attempt hit a port nothing was listening on ("refused" is
-        # exactly what Windows reports for that). (2) `..\venv\...` resolves
-        # to the REPO ROOT's venv (backend\..\venv), not backend's own
-        # .venv -- per HOW_TO_RUN.md, each subproject's venv lives inside
-        # that subproject.
-        "Set-Location '$backend'; `$env:DATABASE_URL='postgresql+asyncpg://nova:nova_password@localhost:5432/nova_db'; .\.venv\Scripts\python.exe -m uvicorn app.main:app --host 127.0.0.1 --port 8000"
+        "Set-Location '$backend'; & .\.venv\Scripts\python.exe -m uvicorn app.main:app --host 127.0.0.1 --port $Port --reload"
     )
 } else {
-    Write-Host "Backend already running on port 8000; reusing it."
+    Write-Host "[+] Backend API already running on port $Port." -ForegroundColor Green
 }
 
-$webUp = Get-NetTCPConnection -LocalPort 3000 -State Listen -ErrorAction SilentlyContinue
-if (-not $webUp) {
-    Start-Process powershell -ArgumentList @(
-        "-NoExit",
-        "-Command",
-        "Set-Location '$dashboard'; `$env:BACKEND_URL='http://localhost:8000'; npm run dev"
-    )
-} else {
-    Write-Host "Dashboard already running on port 3000; reusing it."
+# 4. Start Next.js Dashboard
+if (-not $NoDashboard) {
+    $webUp = Get-NetTCPConnection -LocalPort 3000 -State Listen -ErrorAction SilentlyContinue
+    if (-not $webUp) {
+        Write-Host "[*] Launching Nova Web Dashboard on http://localhost:3000..." -ForegroundColor Green
+        Start-Process powershell -ArgumentList @(
+            "-NoExit",
+            "-Command",
+            "Set-Location '$dashboard'; `$env:BACKEND_URL='http://localhost:8000'; npm run dev"
+        )
+    } else {
+        Write-Host "[+] Dashboard already running on port 3000." -ForegroundColor Green
+    }
 }
 
-Start-Process powershell -ArgumentList @(
-    "-NoExit",
-    "-Command",
-    "Set-Location '$agent'; .\.venv\Scripts\python.exe main.py"
-)
+# 5. Start Desktop Agent
+if (-not $NoAgent) {
+    $agentPy = Join-Path $agent ".venv\Scripts\python.exe"
+    if (Test-Path $agentPy) {
+        Write-Host "[*] Launching Nova Desktop Agent..." -ForegroundColor Green
+        Start-Process powershell -ArgumentList @(
+            "-NoExit",
+            "-Command",
+            "Set-Location '$agent'; & .\.venv\Scripts\python.exe main.py"
+        )
+    } else {
+        Write-Host "[!] Desktop Agent .venv not ready yet; run desktop-agent manually once pip completes." -ForegroundColor Yellow
+    }
+}
 
-Write-Host "Nova started. Website: http://localhost:3000"
-Write-Host "API docs: http://localhost:8000/docs"
+Write-Host ""
+Write-Host "=================================================" -ForegroundColor Cyan
+Write-Host "  Nova Platform is Online:" -ForegroundColor Cyan
+Write-Host "  - Web Dashboard:  http://localhost:3000" -ForegroundColor White
+Write-Host "  - Backend API:    http://127.0.0.1:8000" -ForegroundColor White
+Write-Host "  - API Swagger:    http://127.0.0.1:8000/docs" -ForegroundColor White
+Write-Host "=================================================" -ForegroundColor Cyan
