@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import socket
 
-from PySide6.QtCore import QThread, Signal
+from PySide6.QtCore import Qt, QThread, Signal
 from PySide6.QtWidgets import (
     QDialog,
     QLabel,
@@ -57,6 +57,21 @@ class OnboardingDialog(QDialog):
         self.setWindowTitle("Sign in to Nova")
         self.resize(320, 200)
 
+        # BUG FIX: this dialog is launched at process startup from a
+        # background/tray-ish launch path (double-clicking main.py, a
+        # shortcut, a startup entry) rather than from a click inside an
+        # already-focused window. On Windows in particular that means the
+        # new window frequently does NOT get foreground focus (the OS's
+        # foreground-lock behavior) -- it opens truthfully but behind
+        # whatever the user was already looking at, with nothing on
+        # screen indicating it's there. That's the "it hid behind so I
+        # can't set up" report: the dialog existed and was even modal
+        # (blocking main.py's startup), but invisible behind other
+        # windows, so it looked like setup silently did nothing. Force it
+        # on top for its (short, first-run-only) lifetime and explicitly
+        # pull focus once shown.
+        self.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint, True)
+
         layout = QVBoxLayout(self)
         layout.addWidget(QLabel("Sign in with your Nova account:"))
 
@@ -77,6 +92,16 @@ class OnboardingDialog(QDialog):
         layout.addWidget(self.login_btn)
 
         self._worker: LoginWorker | None = None
+
+    def showEvent(self, event) -> None:
+        super().showEvent(event)
+        # raise_()/activateWindow() in addition to the always-on-top flag
+        # above -- on-top alone can still leave a window unfocused (visible
+        # but not receiving keyboard input) on some window managers. Both
+        # together is what actually guarantees the user sees AND can type
+        # into it the moment it appears.
+        self.raise_()
+        self.activateWindow()
 
     def _on_submit(self) -> None:
         email = self.email_input.text().strip()

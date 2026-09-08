@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Any
 
 import httpx
@@ -53,8 +54,8 @@ class NovaAPIClient:
             return {}
         return {"Authorization": f"Bearer {token}"}
 
-    async def _request(self, method: str, path: str, **kwargs) -> Any:
-        async with httpx.AsyncClient(timeout=30.0) as client:
+    async def _request(self, method: str, path: str, timeout: float = 30.0, **kwargs) -> Any:
+        async with httpx.AsyncClient(timeout=timeout) as client:
             resp = await client.request(method, f"{self.base_url}{path}", headers=self._headers(), **kwargs)
         if resp.status_code >= 400:
             try:
@@ -98,7 +99,19 @@ class NovaAPIClient:
     # ---- normal operation (device-token authenticated) ----
 
     async def chat(self, message: str) -> ChatReply:
-        data = await self._request("POST", "/api/v1/assistant/chat", json={"message": message})
+        # BUG FIX: chat can now involve several sequential model round-trips
+        # server-side (see orchestrator.py's multi-turn tool loop) plus
+        # actual tool execution time -- the previous fixed 30s client
+        # timeout was tuned for single-call endpoints and would cut off a
+        # legitimate multi-step reply (e.g. "get the exchange rate, then
+        # calculate with it") partway through. Other endpoints keep the
+        # short default so a real failure there is still detected fast.
+        data = await self._request(
+            "POST",
+            "/api/v1/assistant/chat",
+            json={"message": message, "client_local_time": datetime.now().astimezone().isoformat()},
+            timeout=150.0,
+        )
         return ChatReply(
             reply=data["reply"],
             tool_calls=[
@@ -137,6 +150,25 @@ class NovaAPIClient:
 
     async def get_reminders(self) -> list[dict]:
         return await self._request("GET", "/api/v1/reminders")
+
+    # BUG FIX: ui/reminder_alert.py's Snooze/Dismiss buttons on the alarm
+    # dialog (spec section 35) have been calling client.snooze_reminder()
+    # and client.dismiss_reminder() since they were written -- neither
+    # method existed on this class. Every click raised AttributeError
+    # inside the fire-and-forget worker thread, silently swallowed by its
+    # generic except-and-emit-failed handler: the dialog closed like the
+    # click worked, but the backend reminder row was never actually
+    # snoozed or deleted. Net effect: the SAME reminder fires again next
+    # poll cycle (or on next agent restart / another device), because as
+    # far as the backend is concerned nothing happened. Both endpoints
+    # already existed and worked correctly on the backend
+    # (POST .../snooze, DELETE ...) -- only the client-side methods to
+    # call them were missing.
+    async def snooze_reminder(self, reminder_id: str, minutes: int = 10) -> dict:
+        return await self._request("POST", f"/api/v1/reminders/{reminder_id}/snooze", params={"minutes": minutes})
+
+    async def dismiss_reminder(self, reminder_id: str) -> None:
+        await self._request("DELETE", f"/api/v1/reminders/{reminder_id}")
 
     async def health_check(self) -> bool:
         try:

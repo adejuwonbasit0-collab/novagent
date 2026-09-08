@@ -109,3 +109,47 @@ class LinuxController(OSController):
             return OSActionResult(success=True, message=f"Opened {path} in {app_name}")
         except Exception as e:
             return OSActionResult(success=False, message="", error=str(e))
+
+    def get_active_window(self) -> OSActionResult:
+        try:
+            # Same xdotool dependency as type_text above -- X11 only. Wayland
+            # has no equivalent cross-desktop-environment API; this fails
+            # with a clear reason there rather than silently returning
+            # nothing, per spec section 47 (don't fake a feature that isn't
+            # actually available).
+            if not shutil.which("xdotool"):
+                raise FileNotFoundError("xdotool is required to read the active window (X11 only)")
+            title = subprocess.run(
+                ["xdotool", "getactivewindow", "getwindowname"], check=True, capture_output=True, text=True
+            ).stdout.strip()
+            window_id = subprocess.run(
+                ["xdotool", "getactivewindow"], check=True, capture_output=True, text=True
+            ).stdout.strip()
+            pid_result = subprocess.run(
+                ["xdotool", "getwindowpid", window_id], capture_output=True, text=True
+            )
+            process_name = "unknown process"
+            if pid_result.returncode == 0 and pid_result.stdout.strip():
+                try:
+                    with open(f"/proc/{pid_result.stdout.strip()}/comm") as f:
+                        process_name = f.read().strip()
+                except OSError:
+                    pass
+            return OSActionResult(success=True, message=f'{process_name} — "{title}"')
+        except Exception as e:
+            return OSActionResult(success=False, message="", error=str(e))
+
+    def read_file(self, path: str, max_chars: int = 20000) -> OSActionResult:
+        try:
+            full_path = os.path.expanduser(os.path.expandvars(path))
+            if not os.path.isfile(full_path):
+                return OSActionResult(success=False, message="", error=f"No file at {path}")
+            with open(full_path, "r", encoding="utf-8", errors="replace") as f:
+                content = f.read(max_chars + 1)
+            truncated = len(content) > max_chars
+            if truncated:
+                content = content[:max_chars]
+            note = f"\n\n[... truncated, file continues past {max_chars} characters]" if truncated else ""
+            return OSActionResult(success=True, message=content + note)
+        except Exception as e:
+            return OSActionResult(success=False, message="", error=str(e))

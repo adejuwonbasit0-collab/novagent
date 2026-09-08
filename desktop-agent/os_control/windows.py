@@ -179,3 +179,53 @@ class WindowsController(OSController):
             return OSActionResult(success=True, message=f"Opened {path} in {app_name}")
         except Exception as e:
             return OSActionResult(success=False, message="", error=str(e))
+
+    def get_active_window(self) -> OSActionResult:
+        try:
+            import ctypes
+            import ctypes.wintypes as wintypes
+
+            hwnd = ctypes.windll.user32.GetForegroundWindow()
+            if not hwnd:
+                return OSActionResult(success=False, message="", error="No foreground window")
+
+            length = ctypes.windll.user32.GetWindowTextLengthW(hwnd)
+            title_buf = ctypes.create_unicode_buffer(length + 1)
+            ctypes.windll.user32.GetWindowTextW(hwnd, title_buf, length + 1)
+            title = title_buf.value or "(untitled window)"
+
+            pid = wintypes.DWORD()
+            ctypes.windll.user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+
+            process_name = "unknown process"
+            # PROCESS_QUERY_LIMITED_INFORMATION (0x1000) is enough to read the
+            # image name without needing the broader (and often
+            # permission-denied-on-elevated-processes) PROCESS_QUERY_INFORMATION.
+            h_process = ctypes.windll.kernel32.OpenProcess(0x1000, False, pid.value)
+            if h_process:
+                try:
+                    buf = ctypes.create_unicode_buffer(260)
+                    size = wintypes.DWORD(260)
+                    if ctypes.windll.kernel32.QueryFullProcessImageNameW(h_process, 0, buf, ctypes.byref(size)):
+                        process_name = os.path.basename(buf.value)
+                finally:
+                    ctypes.windll.kernel32.CloseHandle(h_process)
+
+            return OSActionResult(success=True, message=f"{process_name} — \"{title}\"")
+        except Exception as e:
+            return OSActionResult(success=False, message="", error=str(e))
+
+    def read_file(self, path: str, max_chars: int = 20000) -> OSActionResult:
+        try:
+            full_path = os.path.expandvars(os.path.expanduser(path))
+            if not os.path.isfile(full_path):
+                return OSActionResult(success=False, message="", error=f"No file at {path}")
+            with open(full_path, "r", encoding="utf-8", errors="replace") as f:
+                content = f.read(max_chars + 1)
+            truncated = len(content) > max_chars
+            if truncated:
+                content = content[:max_chars]
+            note = f"\n\n[... truncated, file continues past {max_chars} characters]" if truncated else ""
+            return OSActionResult(success=True, message=content + note)
+        except Exception as e:
+            return OSActionResult(success=False, message="", error=str(e))

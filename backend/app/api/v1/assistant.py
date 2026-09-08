@@ -34,7 +34,7 @@ async def chat(
     ctx = ToolExecutionContext(user=user, db=db, device_id=device.id if device else None, confirmed=False)
 
     try:
-        result = await run_orchestration(payload.message, ctx)
+        result = await run_orchestration(payload.message, ctx, client_local_time=payload.client_local_time)
     except OrchestrationError as e:
         raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(e))
 

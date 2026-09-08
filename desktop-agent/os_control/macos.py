@@ -123,3 +123,38 @@ class MacOSController(OSController):
             return OSActionResult(success=True, message=f"Opened {path} in {app_name}")
         except Exception as e:
             return OSActionResult(success=False, message="", error=str(e))
+
+    def get_active_window(self) -> OSActionResult:
+        try:
+            script = (
+                'tell application "System Events"\n'
+                "set frontApp to first application process whose frontmost is true\n"
+                "set appName to name of frontApp\n"
+                "try\n"
+                "set winName to name of first window of frontApp\n"
+                "on error\n"
+                'set winName to "(no window title)"\n'
+                "end try\n"
+                "return appName & \"|||\" & winName\n"
+                "end tell"
+            )
+            result = subprocess.run(["osascript", "-e", script], check=True, capture_output=True, text=True)
+            app_name, _, window_title = result.stdout.strip().partition("|||")
+            return OSActionResult(success=True, message=f'{app_name} — "{window_title}"')
+        except Exception as e:
+            return OSActionResult(success=False, message="", error=str(e))
+
+    def read_file(self, path: str, max_chars: int = 20000) -> OSActionResult:
+        try:
+            full_path = os.path.expanduser(os.path.expandvars(path))
+            if not os.path.isfile(full_path):
+                return OSActionResult(success=False, message="", error=f"No file at {path}")
+            with open(full_path, "r", encoding="utf-8", errors="replace") as f:
+                content = f.read(max_chars + 1)
+            truncated = len(content) > max_chars
+            if truncated:
+                content = content[:max_chars]
+            note = f"\n\n[... truncated, file continues past {max_chars} characters]" if truncated else ""
+            return OSActionResult(success=True, message=content + note)
+        except Exception as e:
+            return OSActionResult(success=False, message="", error=str(e))

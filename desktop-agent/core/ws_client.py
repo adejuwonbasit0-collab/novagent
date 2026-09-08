@@ -28,6 +28,8 @@ _TOOL_DISPATCH = {
     "create_file": lambda ctl, params: ctl.create_file(params["path"], params.get("content", "")),
     "type_text": lambda ctl, params: ctl.type_text(params["text"]),
     "open_folder_in_application": lambda ctl, params: ctl.open_folder_in_application(params["path"], params["app_name"]),
+    "get_active_window": lambda ctl, params: ctl.get_active_window(),
+    "read_file": lambda ctl, params: ctl.read_file(params["path"], params.get("max_chars", 20000)),
 }
 
 

@@ -27,7 +27,7 @@ class ConversationState(str, Enum):
     OFFLINE = "offline"
 
 
-DEFAULT_INACTIVITY_TIMEOUT_SECONDS = 12.0
+DEFAULT_INACTIVITY_TIMEOUT_SECONDS = 20.0
 
 
 class ConversationStateMachine(QObject):
@@ -147,7 +147,22 @@ class ConversationStateMachine(QObject):
     def on_response_complete(self) -> None:
         """Falls back to ACTIVE_CONVERSATION if the session window is
         still open, otherwise LISTENING -- so a fast follow-up doesn't
-        visually flicker back to 'idle listening' between turns."""
+        visually flicker back to 'idle listening' between turns.
+
+        BUG FIX: this used to only *check* _active_until, never refresh
+        it. _active_until is set once, back in on_verified()/
+        on_continuation() -- i.e. at the START of a turn, before
+        THINKING/EXECUTING/SPEAKING happen. Cloud latency + TTS playback
+        routinely eat most or all of a 12-20s window by themselves, so by
+        the time Nova actually finished speaking and the user could reply,
+        the window was already gone (or a sliver of it was left) -- the
+        user says "hey nova" once, gets an answer, and then a natural
+        follow-up a few seconds later requires the wake word again even
+        though spec section 6 says it shouldn't. Re-arming here gives the
+        user a FULL fresh window measured from when Nova stops talking,
+        which is when a follow-up can actually start."""
+        if not self._paused and not self._stopped:
+            self._arm_timeout(self._inactivity_timeout)
         self._transition(ConversationState.ACTIVE_CONVERSATION if self.is_active_conversation else ConversationState.LISTENING)
 
     def on_error(self) -> None:

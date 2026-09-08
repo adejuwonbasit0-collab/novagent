@@ -70,7 +70,15 @@ class SpeechManager(QObject):
         if self._current is not None or not self._queue:
             return
         text = self._queue.pop(0)
-        self._current = SpeechSpeaker(text, self._fsm)
+        self._current = SpeechSpeaker(text)
+        # BUG FIX: connecting straight to self._fsm.on_speaking here
+        # instead of inside SpeechSpeaker itself is the actual fix (see
+        # voice.py's comment on SpeechSpeaker) -- this connection is
+        # cross-thread (signal emitted from the worker thread, slot lives
+        # on this QObject's thread), so Qt auto-queues it and
+        # on_speaking() always actually runs on the main thread, same as
+        # every other fsm.on_*() call in this codebase.
+        self._current.speaking.connect(self._fsm.on_speaking)
         self._current.finished_speaking.connect(self._on_finished)
         self._current.start()
 
@@ -82,6 +90,12 @@ class SpeechManager(QObject):
         if self._current is not None:
             self._current.wait()
         self._current = None
+        # Moved here from inside SpeechSpeaker.run() -- this slot runs on
+        # the main thread (queued connection from finished_speaking), so
+        # this is now the ONLY place on_response_complete() is called for
+        # a spoken reply, and it's guaranteed to run on the thread the fsm
+        # and its QTimer actually live on.
+        self._fsm.on_response_complete()
         self._maybe_start_next()
 
     def shutdown(self, timeout_ms: int = 2000) -> None:

@@ -89,3 +89,57 @@ ToolRegistry.register(CreateFolderTool())
 ToolRegistry.register(CreateFileTool())
 ToolRegistry.register(TypeTextTool())
 ToolRegistry.register(OpenFolderInApplicationTool())
+
+
+# MISSING FEATURE, now added — see the matching comment in
+# desktop-agent/os_control/base.py. Neither of spec sections 13-14's
+# headline examples ("what app am I using?", "review the code I'm working
+# on") had a tool to call at all.
+class GetActiveWindowInput(BaseModel):
+    pass
+
+
+class GetActiveWindowTool(BaseTool):
+    name = "get_active_window"
+    description = (
+        "Get the name and window title of whatever application currently has focus on the "
+        "user's connected computer. Use this to answer 'what app am I using?' or to figure out "
+        "which application a follow-up request (like 'review my code') is about."
+    )
+    input_schema = GetActiveWindowInput
+    # SCREEN_READ, not APP_OPEN -- a window title can contain sensitive
+    # content (an open document's filename, a private browser tab's page
+    # title), so this is gated behind the same higher-friction permission
+    # as spec section 31's "See what's on a connected device's screen",
+    # not the low-friction "open an app" permission.
+    required_permission = PermissionScope.SCREEN_READ
+    risk_level = RiskLevel.LOW
+    supported_platforms = ("windows", "macos", "linux")
+
+    async def _run(self, params: GetActiveWindowInput, ctx: ToolExecutionContext) -> ToolResponse:
+        return await dispatch(self.name, {}, ctx)
+
+
+class ReadFileInput(BaseModel):
+    path: str = Field(description="Full path of the file to read")
+    max_chars: int = Field(default=20000, le=20000, description="Maximum characters to read back")
+
+
+class ReadFileTool(BaseTool):
+    name = "read_file"
+    description = (
+        "Read the text content of a file on the connected computer (e.g. a source code file the "
+        "user is asking about). Truncated for very large files -- ask the user to point at a "
+        "narrower file or section if what you need isn't in the truncated portion."
+    )
+    input_schema = ReadFileInput
+    required_permission = PermissionScope.FILES_READ
+    risk_level = RiskLevel.LOW
+    supported_platforms = ("windows", "macos", "linux")
+
+    async def _run(self, params: ReadFileInput, ctx: ToolExecutionContext) -> ToolResponse:
+        return await dispatch(self.name, params.model_dump(), ctx)
+
+
+ToolRegistry.register(GetActiveWindowTool())
+ToolRegistry.register(ReadFileTool())

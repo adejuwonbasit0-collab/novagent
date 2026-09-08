@@ -4,6 +4,23 @@
 // primitive for extension-scoped persistent state).
 
 const NovaAPI = (() => {
+  // JS's Date.toISOString() always renders in UTC ("...Z") -- there's no
+  // built-in for "local wall-clock time, with its own offset" the way
+  // Python's datetime.now().astimezone().isoformat() gives for free.
+  // Built from the local getters + getTimezoneOffset() instead.
+  function localIsoWithOffset() {
+    const d = new Date();
+    const pad = (n) => String(n).padStart(2, "0");
+    const offsetMin = -d.getTimezoneOffset(); // JS's sign is inverted vs. what we want
+    const sign = offsetMin >= 0 ? "+" : "-";
+    const abs = Math.abs(offsetMin);
+    const offset = `${sign}${pad(Math.floor(abs / 60))}:${pad(abs % 60)}`;
+    return (
+      `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}` +
+      `T${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}${offset}`
+    );
+  }
+
   async function getBackendUrl() {
     const { backendUrl } = await chrome.storage.local.get("backendUrl");
     return backendUrl || NOVA_CONFIG.DEFAULT_BACKEND_URL;
@@ -95,7 +112,10 @@ const NovaAPI = (() => {
     },
     logout: clearTokens,
     me: () => request("GET", "/api/v1/auth/me"),
-    chat: (message) => request("POST", "/api/v1/assistant/chat", { json: { message } }),
+    // Matches the desktop agent's fix in core/api_client.py -- without this
+    // the model has no idea what "today"/"6 PM"/"in 20 minutes" means when
+    // a reminder request comes through the extension.
+    chat: (message) => request("POST", "/api/v1/assistant/chat", { json: { message, client_local_time: localIsoWithOffset() } }),
     confirmPending: (pendingId) => request("POST", `/api/v1/assistant/confirm/${pendingId}`),
     listReminders: () => request("GET", "/api/v1/reminders"),
   };

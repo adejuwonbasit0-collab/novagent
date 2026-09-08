@@ -178,11 +178,25 @@ class VoiceListener(QThread):
 
 class SpeechSpeaker(QThread):
     finished_speaking = Signal()
+    # BUG FIX: this class used to take `fsm` directly and call
+    # self._fsm.on_speaking() / self._fsm.on_response_complete() from
+    # inside run() -- i.e. from this QThread's own worker thread, not the
+    # main thread ConversationStateMachine (and its QTimer) actually
+    # lives on. That's the identical bug VoiceListener had (see the long
+    # comment at the top of this file) and was fixed there by emitting
+    # signals instead of touching the fsm directly -- but the same fix
+    # was never applied here. This is exactly what produced
+    # "QObject::startTimer: Timers cannot be started from another
+    # thread" / "QObject::killTimer: ..." in practice: on_response_complete()
+    # (called on every single spoken reply) arms conversation_state.py's
+    # inactivity QTimer, from the wrong thread, every time Nova finishes
+    # talking. Fixed the same way: emit signals, let SpeechManager (which
+    # owns the fsm and lives on the main thread) connect them.
+    speaking = Signal()
 
-    def __init__(self, text: str, fsm: ConversationStateMachine | None = None):
+    def __init__(self, text: str):
         super().__init__()
         self._text = text
-        self._fsm = fsm
 
     def run(self) -> None:
         # pyttsx3 on Windows drives SAPI5 through COM, and COM requires
@@ -204,8 +218,7 @@ class SpeechSpeaker(QThread):
             pass  # not on Windows, or pywin32 isn't installed — nothing to do
 
         try:
-            if self._fsm is not None:
-                self._fsm.on_speaking()
+            self.speaking.emit()
             import pyttsx3
 
             engine = pyttsx3.init()
@@ -216,6 +229,4 @@ class SpeechSpeaker(QThread):
                 import pythoncom
 
                 pythoncom.CoUninitialize()
-            if self._fsm is not None:
-                self._fsm.on_response_complete()
             self.finished_speaking.emit()
