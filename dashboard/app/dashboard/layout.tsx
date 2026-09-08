@@ -11,6 +11,7 @@ const NAV = [
   { href: "/dashboard/devices", label: "Devices" },
   { href: "/dashboard/permissions", label: "Permissions" },
   { href: "/dashboard/reminders", label: "Reminders" },
+  { href: "/dashboard/knowledge", label: "Knowledge" },
   { href: "/dashboard/voice", label: "Voice" },
   { href: "/dashboard/assistant", label: "Assistant" },
 ];

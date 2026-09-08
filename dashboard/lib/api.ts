@@ -14,6 +14,25 @@ export class APIError extends Error {
   }
 }
 
+// Same helper as browser-extension/api.js's localIsoWithOffset() -- JS's
+// Date.toISOString() always renders UTC, no built-in for "local wall-clock
+// time with its own offset" the way Python's datetime.now().astimezone()
+// gives for free. Shared shape, kept duplicated rather than as a shared
+// package since this is a Next.js app and the extension is a separate
+// unbundled target.
+function localIsoWithOffset(): string {
+  const d = new Date();
+  const pad = (n: number) => String(n).padStart(2, "0");
+  const offsetMin = -d.getTimezoneOffset();
+  const sign = offsetMin >= 0 ? "+" : "-";
+  const abs = Math.abs(offsetMin);
+  const offset = `${sign}${pad(Math.floor(abs / 60))}:${pad(abs % 60)}`;
+  return (
+    `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}` +
+    `T${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}${offset}`
+  );
+}
+
 async function request<T>(method: string, path: string, json?: unknown): Promise<T> {
   const resp = await fetch(path, {
     method,
@@ -60,6 +79,17 @@ export interface Permission {
   scope: string;
   granted: boolean;
   risk_level: "low" | "medium" | "high";
+}
+
+export interface KnowledgeDocument {
+  id: string;
+  title: string;
+  source_filename: string | null;
+  status: "processing" | "ready" | "failed";
+  error: string | null;
+  char_count: number;
+  chunk_count: number;
+  created_at: string;
 }
 
 export interface Reminder {
@@ -331,10 +361,44 @@ export const api = {
   },
 
   async chat(message: string) {
-    return request<ChatResponse>("POST", "/api/proxy/assistant/chat", { message });
+    // BUG FOUND while adding the knowledge feature: this was the one
+    // remaining call site that didn't send client_local_time -- the same
+    // fix already applied to the desktop agent (core/api_client.py) and
+    // browser extension (api.js). Without it, anything time-relative
+    // asked from the dashboard's own chat ("remind me in 20 minutes")
+    // would hit the same "model has to guess what time it is" gap.
+    return request<ChatResponse>("POST", "/api/proxy/assistant/chat", {
+      message,
+      client_local_time: localIsoWithOffset(),
+    });
   },
 
   async confirmPending(pendingId: string) {
     return request<ToolCall>("POST", `/api/proxy/assistant/confirm/${pendingId}`);
+  },
+
+  async listKnowledgeDocuments() {
+    return request<KnowledgeDocument[]>("GET", "/api/proxy/knowledge/documents");
+  },
+
+  async createKnowledgeTextDocument(title: string, content: string) {
+    return request<KnowledgeDocument>("POST", "/api/proxy/knowledge/documents/text", { title, content });
+  },
+
+  async uploadKnowledgeDocument(file: File): Promise<KnowledgeDocument> {
+    const formData = new FormData();
+    formData.append("file", file);
+    // Same pattern as uploadVoiceSample above -- no Content-Type set on
+    // purpose, the browser sets the multipart boundary itself.
+    const resp = await fetch("/api/proxy/knowledge/documents", { method: "POST", body: formData });
+    if (!resp.ok) {
+      const err = await resp.json().catch(() => ({}));
+      throw new APIError(resp.status, err.detail || "Upload failed");
+    }
+    return resp.json();
+  },
+
+  async deleteKnowledgeDocument(id: string) {
+    return request<void>("DELETE", `/api/proxy/knowledge/documents/${id}`);
   },
 };

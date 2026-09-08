@@ -31,6 +31,7 @@ class PermissionScope(str, enum.Enum):
     SCREEN_READ = "SCREEN_READ"
     AUTOMATION_EXECUTE = "AUTOMATION_EXECUTE"
     REMINDERS_MANAGE = "REMINDERS_MANAGE"
+    KNOWLEDGE_READ = "KNOWLEDGE_READ"
 
 
 class RiskLevel(str, enum.Enum):
@@ -58,6 +59,7 @@ PERMISSION_RISK: dict[PermissionScope, RiskLevel] = {
     PermissionScope.SCREEN_READ: RiskLevel.HIGH,
     PermissionScope.AUTOMATION_EXECUTE: RiskLevel.MEDIUM,
     PermissionScope.REMINDERS_MANAGE: RiskLevel.LOW,
+    PermissionScope.KNOWLEDGE_READ: RiskLevel.LOW,
 }
 
 

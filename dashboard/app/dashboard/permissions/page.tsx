@@ -26,6 +26,7 @@ const SCOPE_DESCRIPTIONS: Record<string, string> = {
   SCREEN_READ: "See what's on a connected device's screen",
   AUTOMATION_EXECUTE: "Run automations you've created",
   REMINDERS_MANAGE: "Create and manage reminders",
+  KNOWLEDGE_READ: "Search your uploaded documents and notes",
 };
 
 export default function PermissionsPage() {

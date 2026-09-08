@@ -3,7 +3,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.api.v1 import admin, assistant, auth, devices, permissions, reminders, settings as settings_api, speaker, tools, voice, ws
+from app.api.v1 import admin, assistant, auth, devices, knowledge, permissions, reminders, settings as settings_api, speaker, tools, voice, ws
 from app.core.config import settings
 from app.services.connection_manager import connection_manager
 
@@ -11,6 +11,7 @@ from app.services.connection_manager import connection_manager
 import app.tools.reminder_tools  # noqa: F401
 import app.tools.system_tools  # noqa: F401
 import app.tools.os_file_tools  # noqa: F401
+import app.tools.knowledge_tools  # noqa: F401
 
 
 @asynccontextmanager
@@ -48,6 +49,7 @@ app.include_router(admin.router)
 app.include_router(devices.router)
 app.include_router(permissions.router)
 app.include_router(reminders.router)
+app.include_router(knowledge.router)
 app.include_router(voice.router)
 app.include_router(speaker.router)
 app.include_router(settings_api.router)

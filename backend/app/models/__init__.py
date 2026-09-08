@@ -1,6 +1,13 @@
 from app.models.ai_provider import AIProvider, AIProviderSettings
 from app.models.audit_log import AuditLog
 from app.models.device import Device, DevicePlatform
+from app.models.knowledge import (
+    MAX_CHUNKS_PER_USER,
+    MAX_DOCUMENTS_PER_USER,
+    KnowledgeChunk,
+    KnowledgeDocument,
+    KnowledgeDocumentStatus,
+)
 from app.models.pending_tool_call import PendingToolCall
 from app.models.platform_settings import PlatformSettings
 from app.models.permission import PERMISSION_RISK, PermissionScope, RiskLevel, UserPermission
@@ -27,6 +34,11 @@ __all__ = [
     "AuditLog",
     "Device",
     "DevicePlatform",
+    "MAX_CHUNKS_PER_USER",
+    "MAX_DOCUMENTS_PER_USER",
+    "KnowledgeChunk",
+    "KnowledgeDocument",
+    "KnowledgeDocumentStatus",
     "PendingToolCall",
     "PlatformSettings",
     "PERMISSION_RISK",
