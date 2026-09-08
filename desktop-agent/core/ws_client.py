@@ -5,13 +5,24 @@ import json
 import logging
 
 import websockets
-from websockets.exceptions import ConnectionClosed
+from PySide6.QtCore import QObject, Signal
+from websockets.exceptions import ConnectionClosed, InvalidStatus
 
 from config import settings
 from core.device_store import DeviceStore
 from os_control.base import OSActionResult, OSController, get_controller
 
 logger = logging.getLogger("nova.ws_client")
+
+# Status codes the backend's handshake can reject with. /api/v1/ws/device
+# (see backend/app/api/v1/ws.py) never calls websocket.accept() when
+# _authenticate_device() returns None — it closes immediately instead —
+# and uvicorn reports an un-accepted WebSocket as a plain HTTP rejection
+# in that case, which the client sees as InvalidStatus, not a clean
+# close code. Any rejection on THIS endpoint means the token is dead
+# (wrong/rotated/points at a device row that no longer exists), not a
+# transient network issue, so it gets handled differently below.
+_AUTH_REJECTED_STATUS_CODES = {401, 403}
 
 # Maps tool names the backend can dispatch to the OSController method that
 # actually performs them. Kept as an explicit table rather than getattr()
@@ -39,16 +50,30 @@ def _ws_url(base_url: str, token: str) -> str:
     return f"{scheme}://{host}/api/v1/ws/device?token={token}"
 
 
-class DeviceWebSocketClient:
+class DeviceWebSocketClient(QObject):
     """
     Maintains the persistent connection described in spec section 3 — the
     channel that lets the cloud backend actually reach this machine's OS,
     which a plain web request never could. Reconnects with backoff on
     disconnect; each incoming command is executed via OSController and
     acknowledged with a result message correlated by request_id.
+
+    BUG FIX — a rejected handshake (401/403: bad, rotated, or orphaned
+    device token — e.g. the device row it points to no longer exists in
+    whatever database the backend is currently pointed at) used to be
+    treated exactly like a transient network blip: log a warning, back
+    off, retry the SAME dead token forever. It can never succeed on its
+    own, so the agent would sit there logging "connection failed" in an
+    infinite loop with no way out short of the user manually finding and
+    deleting device.json. Now: on a 401/403 specifically, the stale
+    credential is cleared and device_rejected fires so the app can put
+    the user straight back into onboarding to get a fresh one.
     """
 
+    device_rejected = Signal()
+
     def __init__(self, controller: OSController | None = None):
+        super().__init__()
         self._controller = controller or get_controller()
         self._stop = False
 
@@ -68,6 +93,19 @@ class DeviceWebSocketClient:
                     await self._listen(ws)
             except ConnectionClosed:
                 logger.warning("WebSocket disconnected — reconnecting")
+            except InvalidStatus as e:
+                if e.response.status_code in _AUTH_REJECTED_STATUS_CODES:
+                    logger.warning(
+                        "Device token rejected (HTTP %d) — this device is no longer "
+                        "recognized by the backend. Clearing it and asking to re-pair "
+                        "instead of retrying a token that can never work.",
+                        e.response.status_code,
+                    )
+                    DeviceStore.clear()
+                    self.device_rejected.emit()
+                    backoff = 2  # next loop iteration finds no token and just waits
+                else:
+                    logger.warning("WebSocket connection failed: %s", e)
             except Exception as e:
                 logger.warning("WebSocket connection failed: %s", e)
 

@@ -77,6 +77,7 @@ class NovaAgentApp:
         self.chat_panel = ChatPanel(self.client, self.voice_service)
 
         self.ws_client = DeviceWebSocketClient()
+        self.ws_client.device_rejected.connect(self._on_device_rejected)
         self._ws_thread: threading.Thread | None = None
         self._health_worker: HealthCheckWorker | None = None
         self._health_timer = QTimer()
@@ -159,6 +160,23 @@ class NovaAgentApp:
 
     def _on_reminder_due(self, reminder) -> None:
         present_reminder(reminder, self.client, self.voice_service)
+
+    def _on_device_rejected(self) -> None:
+        """
+        Fires when DeviceWebSocketClient hits a 401/403 on the device
+        WebSocket and clears the dead token (see ws_client.py). Rather
+        than leaving the bubble sitting there silently unable to do
+        anything, surface it and send the user straight back through
+        onboarding to get re-paired -- this is the same dialog first
+        run uses, it's just as valid for "this device fell out of sync
+        with the backend" as it is for "never registered at all".
+        """
+        self.voice_service.fsm.set_offline(True)
+        dialog = OnboardingDialog(self.client)
+        dialog.show()
+        dialog.raise_()
+        dialog.activateWindow()
+        dialog.exec()  # ws_client.run_forever() picks up the new token on its own next loop
 
     def run(self) -> int:
         if not self._run_onboarding_if_needed():
