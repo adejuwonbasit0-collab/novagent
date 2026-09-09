@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import enum
 
-from sqlalchemy import Boolean, Enum as SAEnum, String
+from sqlalchemy import Boolean, String
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.core.database import Base
@@ -28,10 +28,9 @@ class User(UUIDPKMixin, TimestampMixin, Base):
     hashed_password: Mapped[str] = mapped_column(String(255), nullable=False)
     full_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
 
-    status: Mapped[UserStatus] = mapped_column(
-        SAEnum(UserStatus, name="user_status"), default=UserStatus.ACTIVE, nullable=False
-    )
-    role: Mapped[UserRole] = mapped_column(SAEnum(UserRole, name="user_role"), default=UserRole.USER, nullable=False)
+    # Changed: Use String instead of SAEnum for SQLite compatibility
+    status: Mapped[str] = mapped_column(String(50), default="active", nullable=False)
+    role: Mapped[str] = mapped_column(String(50), default="user", nullable=False)
 
     is_email_verified: Mapped[bool] = mapped_column(Boolean, default=False)
 
