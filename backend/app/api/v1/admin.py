@@ -127,14 +127,53 @@ async def update_assistant_name(
     return AssistantNameOut(assistant_name=settings.assistant_name)
 
 
-def _provider_out(settings: AIProviderSettings) -> AIProviderSettingsOut:
+def _provider_out(settings: AIProviderSettings, key_warning: str | None = None) -> AIProviderSettingsOut:
     return AIProviderSettingsOut(
         provider=settings.provider,
         model=settings.model,
         base_url=settings.base_url,
         has_api_key=bool(settings.encrypted_api_key),
         enabled=settings.enabled,
+        key_warning=key_warning,
     )
+
+
+# Mirrors dashboard/app/admin/ai-provider/page.tsx's KEY_PREFIX_HINTS — kept
+# in sync manually since this is a small, stable list; if one changes,
+# change the other. This is the backend backstop for the same root-cause
+# bug (see that file's comment): a key saved while the wrong provider is
+# selected gets sent, unmodified, to the wrong provider's endpoint, and
+# the resulting "invalid_api_key" error gives no hint why. Any direct API
+# caller (not just the dashboard UI) gets this warning too.
+_KEY_PREFIX_HINTS: dict[str, tuple[str, str]] = {
+    "anthropic": ("sk-ant-", "Anthropic"),
+    "openai": ("sk-", "OpenAI"),
+    "openrouter": ("sk-or-", "OpenRouter"),
+    "groq": ("gsk_", "Groq"),
+    "gemini": ("AIza", "Google Gemini"),
+}
+
+
+def _detect_key_mismatch(provider: str, api_key: str) -> str | None:
+    key = api_key.strip()
+    if not key:
+        return None
+    # BUG (caught by actually running this, not just reading it): an
+    # Anthropic key ("sk-ant-...") also starts with the generic "sk-"
+    # prefix used for OpenAI, so a naive per-provider "does it start with
+    # this prefix" check matches BOTH and the mismatch never fires for
+    # exactly the case this exists to catch. Rank by prefix length
+    # (most specific first) and take the single best match as the key's
+    # actual detected provider, then compare that to what's selected —
+    # "sk-ant-" beats "sk-" for an Anthropic key even though both match.
+    best_provider, best_prefix, best_label = None, "", ""
+    for other_provider, (prefix, label) in _KEY_PREFIX_HINTS.items():
+        if key.startswith(prefix) and len(prefix) > len(best_prefix):
+            best_provider, best_prefix, best_label = other_provider, prefix, label
+    if best_provider and best_provider != provider:
+        provider_label = next((p_label for p, (_, p_label) in _KEY_PREFIX_HINTS.items() if p == provider), provider)
+        return f"This looks like a {best_label} key, but Provider is set to {provider_label}."
+    return None
 
 
 @router.get("/ai-provider", response_model=AIProviderSettingsOut)
@@ -164,11 +203,13 @@ async def update_ai_provider(
     settings.model = payload.model
     settings.base_url = payload.base_url
     settings.enabled = payload.enabled
+    key_warning = None
     if payload.api_key:
+        key_warning = _detect_key_mismatch(payload.provider.value, payload.api_key)
         settings.encrypted_api_key = encrypt_provider_key(payload.api_key)
     await db.commit()
     await db.refresh(settings)
-    return _provider_out(settings)
+    return _provider_out(settings, key_warning=key_warning)
 
 # Every route here requires get_current_admin — a 403 for anyone whose role
 # isn't ADMIN or SUPER_ADMIN, checked before any query runs.

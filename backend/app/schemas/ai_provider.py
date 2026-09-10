@@ -9,6 +9,10 @@ class AIProviderSettingsOut(BaseModel):
     base_url: str | None
     has_api_key: bool
     enabled: bool
+    # Only ever populated by PUT, right after receiving a plaintext key in
+    # the request — GET can't compute this without decrypting the stored
+    # key just to check its shape, which isn't worth doing for a hint.
+    key_warning: str | None = None
 
 
 class AIProviderSettingsUpdate(BaseModel):
