@@ -8,9 +8,21 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
 from app.core.security import TokenType, decode_token
-from app.models.user import User, UserStatus
+from app.models.user import User
 
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/v1/auth/login")
+
+
+def _norm(value) -> str:
+    """Normalize enum-or-string status/role values to a plain lowercase string.
+
+    The User model stores status/role as plain strings on SQLite (no native
+    enum type), but as SAEnum on PostgreSQL. This accepts either form so
+    comparisons work identically on both backends.
+    """
+    if value is None:
+        return ""
+    return getattr(value, "value", value)
 
 
 async def get_current_user(
@@ -45,16 +57,14 @@ async def get_current_user(
 
     if user is None:
         raise credentials_exception
-    if user.status != UserStatus.ACTIVE:
+    if _norm(user.status) != "active":
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Account is not active")
 
     return user
 
 
 async def get_current_admin(user: User = Depends(get_current_user)) -> User:
-    from app.models.user import UserRole
-
-    if user.role not in (UserRole.ADMIN, UserRole.SUPER_ADMIN):
+    if _norm(user.role) not in ("admin", "super_admin"):
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Admin access required")
     return user
 
@@ -171,7 +181,7 @@ async def get_current_actor(
 
         user_result = await db.execute(select(User).where(User.id == device.user_id))
         user = user_result.scalar_one_or_none()
-        if user is None or user.status != UserStatus.ACTIVE:
+        if user is None or _norm(user.status) != "active":
             raise credentials_exception
 
         device.last_seen_at = datetime.now(timezone.utc)

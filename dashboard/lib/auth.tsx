@@ -7,7 +7,7 @@ import { api, User } from "./api";
 interface AuthContextValue {
   user: User | null;
   loading: boolean;
-  refresh: () => Promise<void>;
+  refresh: () => Promise<User | null>;
   logout: () => void;
 }
 
@@ -17,15 +17,25 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const [user, setUser] = useState<User | null>(null);
   const [loading, setLoading] = useState(true);
 
-  async function refresh() {
-    // No client-visible token to check anymore — the httpOnly cookie is
-    // invisible to JS by design, so we just ask the server via /auth/me
-    // and treat any failure as "not logged in."
+  // BUG FIX: this used to be `async function refresh(): Promise<void>` —
+  // it set `user` state but told no caller whether that succeeded. The
+  // login page called `await refresh(); router.push("/dashboard")`
+  // unconditionally, so ANY reason /auth/me failed right after a
+  // successful login (expired-immediately token, cookie not actually
+  // persisted by the browser, a backend hiccup) sent the user to
+  // /dashboard anyway — which then bounced them straight back to
+  // /login via useRequireAuth, with no error ever shown. From the
+  // outside that looks exactly like "the login page just refreshes
+  // itself and does nothing." Returning the result lets the login page
+  // actually tell the two situations apart.
+  async function refresh(): Promise<User | null> {
     try {
       const me = await api.me();
       setUser(me);
+      return me;
     } catch {
       setUser(null);
+      return null;
     } finally {
       setLoading(false);
     }

@@ -4,6 +4,7 @@ import { useState } from "react";
 import { useRouter } from "next/navigation";
 import Link from "next/link";
 import { api, APIError } from "@/lib/api";
+import { useAuth } from "@/lib/auth";
 
 export default function RegisterPage() {
   const [fullName, setFullName] = useState("");
@@ -12,6 +13,7 @@ export default function RegisterPage() {
   const [error, setError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
   const router = useRouter();
+  const { refresh } = useAuth();
 
   async function onSubmit(e: React.FormEvent) {
     e.preventDefault();
@@ -20,6 +22,15 @@ export default function RegisterPage() {
     try {
       await api.register(email, password, fullName || undefined);
       await api.login(email, password);
+      const me = await refresh();
+      if (!me) {
+        setError(
+          "Account created and signed in, but couldn't start your session. If you're testing a " +
+            "production build over plain http, try http://localhost instead of http://127.0.0.1, " +
+            "or use `npm run dev`."
+        );
+        return;
+      }
       router.push("/dashboard");
     } catch (err) {
       setError(err instanceof APIError ? err.message : "Something went wrong. Try again.");

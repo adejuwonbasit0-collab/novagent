@@ -20,7 +20,22 @@ export default function LoginPage() {
     setSubmitting(true);
     try {
       await api.login(email, password);
-      await refresh();
+      const me = await refresh();
+      if (!me) {
+        // Login itself succeeded (no APIError thrown above), but the
+        // follow-up /auth/me didn't come back with a session -- most
+        // likely the browser didn't actually store the session cookie
+        // (e.g. testing a production build over plain http://127.0.0.1,
+        // where the Secure cookie attribute gets silently dropped -- see
+        // the comment in lib/server-auth.ts). Surfacing this beats the
+        // old behavior of silently bouncing back to /login with no
+        // explanation at all.
+        setError(
+          "Signed in, but couldn't start your session. If you're testing a production build " +
+            "over plain http, try http://localhost instead of http://127.0.0.1, or use `npm run dev`."
+        );
+        return;
+      }
       router.push("/dashboard");
     } catch (err) {
       setError(err instanceof APIError ? err.message : "Something went wrong. Try again.");

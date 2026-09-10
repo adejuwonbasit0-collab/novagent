@@ -1,5 +1,4 @@
 import uuid
-from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy import select
@@ -31,9 +30,9 @@ async def register_device(
 ):
     """
     Called once when the desktop agent / browser extension installer
-    finishes authenticating (spec section 32, step 3). The returned
-    device_token is shown ONCE — only its hash is persisted, so it
-    cannot be recovered later; a lost token means re-registering the device.
+    finishes authenticating. The returned device_token is shown ONCE —
+    only its hash is persisted, so it cannot be recovered later; a lost
+    token means re-registering the device.
     """
     device = Device(
         user_id=current_user.id,
@@ -59,7 +58,9 @@ async def list_devices(
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    result = await db.execute(select(Device).where(Device.user_id == current_user.id).order_by(Device.created_at.desc()))
+    result = await db.execute(
+        select(Device).where(Device.user_id == current_user.id).order_by(Device.created_at.desc())
+    )
     return result.scalars().all()
 
 
@@ -83,10 +84,12 @@ async def revoke_device(
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    """Immediately invalidates the device — get_current_device (used by
+    """
+    Immediately invalidates the device — get_current_device (used by
     desktop-agent-facing endpoints) checks is_active on every request,
     so this takes effect on the device's very next call, no token
-    expiry wait required."""
+    expiry wait required.
+    """
     device = await _get_owned_device(device_id, current_user, db)
     device.is_active = False
     await db.commit()

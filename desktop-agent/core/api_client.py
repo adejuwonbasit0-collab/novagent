@@ -49,7 +49,24 @@ class NovaAPIClient:
     # ---- internal ----
 
     def _headers(self) -> dict[str, str]:
-        token = self._device_token or self._user_token
+        # BUG FIX: this used to be `self._device_token or self._user_token`,
+        # which means ANY device token already sitting on disk (from a
+        # previous pairing attempt -- against this database, a different
+        # one, since revoked, doesn't matter which) silently won out over
+        # a token just obtained by calling login() moments ago. register_
+        # _this_device() would then authenticate as that OLD device
+        # instead of the new user, and the backend correctly rejects it
+        # with 401 "Could not validate credentials" / "Invalid or missing
+        # device token" -- which looks exactly like login itself failed,
+        # even though login succeeded fine.
+        #
+        # _user_token is only ever non-None for the few calls between
+        # login() and register_this_device() succeeding (see
+        # register_this_device below, which clears it immediately after).
+        # Prefer it whenever it's set — normal operation (chat, etc.)
+        # never sets it, so those calls are unaffected and still
+        # authenticate as the stored device exactly as before.
+        token = self._user_token or self._device_token
         if not token:
             return {}
         return {"Authorization": f"Bearer {token}"}
